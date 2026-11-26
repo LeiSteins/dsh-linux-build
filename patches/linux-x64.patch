@@ -125,19 +125,21 @@ index 6a63dc72..55e9674c 100644
        void api.takeNotice().then((notice) => {
          if (mounted.current && notice === 'session-expired') setExpiryNotice(true)
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 291ed084..a68f253a 100644
+index 291ed084..dbec77f1 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -72,6 +72,8 @@ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
+@@ -72,6 +72,10 @@ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
  import { DesktopTray } from './tray.ts'
  import { DesktopBackgroundNotice } from './background-notice.ts'
  
 +const linuxProductName = process.platform === 'linux' && app.isPackaged ? process.env.DSH_CLIENT_TITLE : undefined
++/** Windows and Linux hide the native title bar and let the renderer own the caption row. */
++const usesTitleBarOverlay = process.platform === 'win32' || process.platform === 'linux'
 +
  let focusPrimaryWindow = (): void => {}
  let stopForRecovery = async (): Promise<void> => { await stopOperationReports() }
  let shuttingDown = false
-@@ -207,13 +209,16 @@ interface RuntimeResources {
+@@ -207,13 +211,16 @@ interface RuntimeResources {
  
  function runtimeResources(): RuntimeResources {
    const development = !app.isPackaged
@@ -156,16 +158,36 @@ index 291ed084..a68f253a 100644
    return { node, nodeBin, pnpm, dsh }
  }
  
-@@ -268,6 +273,8 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+@@ -268,7 +275,9 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
      minWidth: 520,
      minHeight: 600,
      show,
+-    ...(process.platform === 'win32' && primary ? {
 +    ...(process.platform === 'linux' && app.isPackaged
 +      ? { title: linuxProductName ?? 'DeepSeek Harness', icon: join(process.resourcesPath, 'icon.png') } : {}),
-     ...(process.platform === 'win32' && primary ? {
++    ...(usesTitleBarOverlay && primary ? {
        backgroundColor: chromeFallbackFill(),
        titleBarStyle: 'hidden' as const,
-@@ -472,7 +479,7 @@ async function main(): Promise<void> {
+       titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
+@@ -299,7 +308,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+     if (['http:', 'https:'].includes(new URL(url).protocol)) void shell.openExternal(url)
+     return { action: 'deny' }
+   })
+-  if (process.platform === 'darwin' || process.platform === 'win32') {
++  if (process.platform === 'darwin' || usesTitleBarOverlay) {
+     // Fullscreen hides native window controls; overlays drop their caption clearance.
+     const sendFullscreen = (): void => {
+       if (!window.isDestroyed()) window.webContents.send(DESKTOP_IPC.windowFullscreen, window.isFullScreen())
+@@ -310,7 +319,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+     // current state so a fullscreen reload does not fall back to windowed CSS.
+     window.webContents.on('did-finish-load', sendFullscreen)
+   }
+-  if (process.platform === 'win32' && primary) {
++  if (usesTitleBarOverlay && primary) {
+     const updateBackground = (): void => {
+       if (!window.isDestroyed()) window.setBackgroundColor(chromeFallbackFill())
+     }
+@@ -472,7 +481,7 @@ async function main(): Promise<void> {
    // Copy comes from the same locale as the update prompts so the dialog
    // chrome and its content never mix languages.
    const showAbout = async (): Promise<void> => {
@@ -174,7 +196,7 @@ index 291ed084..a68f253a 100644
        detail: formatDesktopMessage(locale.messages.aboutVersion, { version: app.getVersion() }),
        buttons: [locale.messages.updateAcknowledge], cancelId: 0 })
    }
-@@ -1164,7 +1171,7 @@ async function main(): Promise<void> {
+@@ -1164,7 +1173,7 @@ async function main(): Promise<void> {
    const applicationIconPath = development ? join(app.getAppPath(), 'resources', 'icon-windows.png')
      : join(process.resourcesPath, 'icon.png')
    app.setAboutPanelOptions({
@@ -183,7 +205,16 @@ index 291ed084..a68f253a 100644
      applicationVersion: app.getVersion(),
      // The release has no separate build number; omit Electron's bundle version.
      version: '',
-@@ -1249,8 +1256,9 @@ async function main(): Promise<void> {
+@@ -1241,7 +1250,7 @@ async function main(): Promise<void> {
+     devToolsF12Shortcut,
+   ]
+   const refreshApplicationMenu = (): void => {
+-    Menu.setApplicationMenu(Menu.buildFromTemplate(process.platform === 'win32'
++    Menu.setApplicationMenu(Menu.buildFromTemplate(usesTitleBarOverlay
+       ? windowsDevToolsShortcuts : [{
+         label: darwin ? app.name : currentDesktopLocale().messages.application,
+         submenu: [...applicationItems(), devToolsF12Shortcut],
+@@ -1249,8 +1258,9 @@ async function main(): Promise<void> {
      tray?.relabel()
    }
    refreshApplicationMenu()
@@ -191,10 +222,70 @@ index 291ed084..a68f253a 100644
 -  if (process.platform === 'win32') {
 +  const trayIconPath = process.platform === 'linux' ? applicationIconPath
 +    : development ? join(app.getAppPath(), 'resources', 'tray-windows.ico') : join(process.resourcesPath, 'tray.ico')
-+  if (process.platform === 'win32' || process.platform === 'linux') {
++  if (usesTitleBarOverlay) {
      // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
      try {
        tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
+@@ -1274,7 +1284,7 @@ async function main(): Promise<void> {
+     ...(process.platform === 'win32' ? { icon: nativeImage.createFromPath(trayIconPath) } : {}),
+   })
+ 
+-  if (process.platform === 'win32') {
++  if (usesTitleBarOverlay) {
+     ipcMain.handle(DESKTOP_IPC.windowsMenu, (event, name: unknown, x: unknown, y: unknown) => {
+       assertDesktopSender(event, ['app'])
+       if (mainWindow === undefined || event.sender !== mainWindow.webContents
+@@ -1381,7 +1391,7 @@ async function main(): Promise<void> {
+     const window = mainWindow ?? createMainWindow()
+     await navigateMain(applicationUrl)
+     if (isQuitting() || recovery.active || window.isDestroyed()) return
+-    if (process.platform === 'win32') window.setBackgroundColor(chromeFallbackFill())
++    if (usesTitleBarOverlay) window.setBackgroundColor(chromeFallbackFill())
+     if (activate) window.show()
+     else window.showInactive()
+     const wasInWorkspace = enteredWorkspace
+diff --git a/apps/desktop/src/preload-platform.ts b/apps/desktop/src/preload-platform.ts
+index 1e197b0c..24f0777f 100644
+--- a/apps/desktop/src/preload-platform.ts
++++ b/apps/desktop/src/preload-platform.ts
+@@ -17,13 +17,13 @@ export function markDocumentPlatform(): void {
+ }
+ 
+ /**
+- * Mirrors the window's macOS and Windows fullscreen state onto `<html data-fullscreen>` so
+- * CSS drops the clearance for hidden native window controls. The main
++ * Mirrors the window's macOS, Windows, and Linux fullscreen state onto `<html data-fullscreen>`
++ * so CSS drops the clearance for hidden native window controls. The main
+  * process sends the state on every transition and after each load.
+  */
+ export function syncWindowFullscreen(): void {
+-  // The main process sends this IPC only on macOS and Windows; other platforms need no listener.
+-  if (process.platform !== 'darwin' && process.platform !== 'win32') return
++  // The main process sends this IPC only where the caption reports fullscreen.
++  if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') return
+   ipcRenderer.on(DESKTOP_IPC.windowFullscreen, (_event, fullscreen: boolean) => {
+     const root = document.documentElement as HTMLElement | null
+     if (root === null) return
+diff --git a/apps/desktop/src/preload-windows.ts b/apps/desktop/src/preload-windows.ts
+index 5b9ed756..03a5b07d 100644
+--- a/apps/desktop/src/preload-windows.ts
++++ b/apps/desktop/src/preload-windows.ts
+@@ -1,12 +1,12 @@
+ import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+-/** Synchronizes Windows context menus and caption colors with the application document. */
++/** Synchronizes Windows and Linux context menus and caption colors with the application document. */
+ import { ipcRenderer } from 'electron'
+ import { DESKTOP_IPC } from './ipc.ts'
+ import { installWindowsMenu } from './preload-menu.ts'
+ 
+-/** Install the Windows-only titlebar marker and observe application language and palette changes. */
++/** Install the caption titlebar marker and observe application language and palette changes. */
+ export function syncWindowsAppearance(): void {
+-  if (process.platform !== 'win32') return
++  if (process.platform !== 'win32' && process.platform !== 'linux') return
+   const mark = (): void => {
+     const root = document.documentElement
+     root.dataset.windowsTitlebar = ''
 diff --git a/apps/desktop/src/tray.ts b/apps/desktop/src/tray.ts
 index b2ce416b..63d8cc56 100644
 --- a/apps/desktop/src/tray.ts
@@ -224,6 +315,19 @@ index b2ce416b..63d8cc56 100644
      this.tray = tray
      tray.on('click', () => { options.open() })
      this.relabel()
+diff --git a/apps/desktop/src/update-overlay.ts b/apps/desktop/src/update-overlay.ts
+index 0de12469..3c085be4 100644
+--- a/apps/desktop/src/update-overlay.ts
++++ b/apps/desktop/src/update-overlay.ts
+@@ -48,7 +48,7 @@ export class DesktopUpdateOverlays {
+     input.active++; input.revision++
+     const resize = (): void => {
+       const { width, height } = parent.getContentBounds()
+-      const top = process.platform === 'win32' ? WINDOWS_TITLEBAR_HEIGHT : 0
++      const top = process.platform === 'win32' || process.platform === 'linux' ? WINDOWS_TITLEBAR_HEIGHT : 0
+       view.setBounds({ x: 0, y: top, width, height: Math.max(0, height - top) })
+     }
+     const focus = (): void => {
 diff --git a/apps/desktop/src/welcome-window.ts b/apps/desktop/src/welcome-window.ts
 index 61fda9e3..d5457a11 100644
 --- a/apps/desktop/src/welcome-window.ts
@@ -266,6 +370,231 @@ index 5d16769a..e6ef261d 100644
  assert.ok(process.execArgv.includes('--expose-internals'))
  assert.equal(typeof require('internal/modules/esm/loader').getOrInitializeCascadedLoader, 'function')
  console.log('desktop-node-script-ok')
+diff --git a/apps/desktop/tests/main-startup.spec.ts b/apps/desktop/tests/main-startup.spec.ts
+index e689f3e6..51ae871e 100644
+--- a/apps/desktop/tests/main-startup.spec.ts
++++ b/apps/desktop/tests/main-startup.spec.ts
+@@ -837,7 +837,7 @@ describe('desktop main startup', () => {
+     expect(visible.filter(item => item.role === 'toggleDevTools')).toEqual([
+       { role: 'toggleDevTools', label: messages.toggleDevToolsMenu },
+     ])
+-    if (platform === 'win32') {
++    if (platform === 'win32' || platform === 'linux') {
+       expect(harness.menu.mock.calls[0]![0]).toEqual([
+         { role: 'toggleDevTools', visible: false },
+         { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
+@@ -853,7 +853,7 @@ describe('desktop main startup', () => {
+     harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.localeChanged)![1](
+       { sender, senderFrame: sender.mainFrame }, nextLocale,
+     )
+-    const refreshed = platform === 'win32' ? applicationMenuItems()
++    const refreshed = platform === 'win32' || platform === 'linux' ? applicationMenuItems()
+       : harness.menu.mock.lastCall![0][0]!.submenu as MenuItemConstructorOptions[]
+     expect(refreshed.filter(item => item.role === 'toggleDevTools' && item.visible !== false)).toEqual([
+       { role: 'toggleDevTools', label: nextLocale === 'en' ? en.toggleDevToolsMenu : zh.toggleDevToolsMenu },
+@@ -1154,7 +1154,7 @@ describe('desktop main startup', () => {
+     }
+   })
+ 
+-  it.each(['darwin', 'win32', 'linux'] as const)('limits native titlebar styling to macOS on %s', async (platform) => {
++  it.each(['darwin', 'win32', 'linux'] as const)('limits native titlebar styling to desktop platforms on %s', async (platform) => {
+     vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+     await import('../src/main.ts')
+     await harness.preparing.promise
+@@ -1162,17 +1162,13 @@ describe('desktop main startup', () => {
+     expect(window.urls).toEqual(['dsh-app://app/'])
+     if (platform === 'darwin') {
+       expect(window.options).toMatchObject({ titleBarStyle: 'hiddenInset', vibrancy: 'sidebar', backgroundColor: '#00000000' })
+-    } else if (platform === 'win32') {
++    } else if (platform === 'win32' || platform === 'linux') {
+       expect(window.options).toMatchObject({ titleBarStyle: 'hidden', titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT } })
+       expect(window.options).not.toHaveProperty('vibrancy')
+       expect(harness.menu.mock.calls[0]![0]).toEqual([
+         { role: 'toggleDevTools', visible: false },
+         { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
+       ])
+-    } else {
+-      expect(window.options).not.toHaveProperty('backgroundColor')
+-      expect(window.options).not.toHaveProperty('titleBarStyle')
+-      expect(window.options).not.toHaveProperty('vibrancy')
+     }
+     expect(harness.hosts).toHaveLength(0)
+   })
+@@ -1253,7 +1249,7 @@ describe('desktop main startup', () => {
+     expect((await handler(new Request('dsh-app://foreign/index.html'))).status).toBe(404)
+   })
+ 
+-  it.each(['darwin', 'win32'] as const)('relays the %s fullscreen state on transitions and after each load', async (platform) => {
++  it.each(['darwin', 'win32', 'linux'] as const)('relays the %s fullscreen state on transitions and after each load', async (platform) => {
+     vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+     await import('../src/main.ts')
+     await harness.preparing.promise
+@@ -1276,16 +1272,6 @@ describe('desktop main startup', () => {
+     expect(sent()).toHaveLength(relayed)
+   })
+ 
+-  it.each(['linux'] as const)('registers no fullscreen relay on %s', async (platform) => {
+-    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+-    await import('../src/main.ts')
+-    await harness.preparing.promise
+-    const window = harness.windows[0]!
+-    window.emit('enter-full-screen')
+-    window.webContents.emit('did-finish-load')
+-    expect(window.webContents.send.mock.calls.filter(([channel]) => channel === DESKTOP_IPC.windowFullscreen)).toHaveLength(0)
+-  })
+-
+   it('covers the macOS vibrancy reattach gap with an opaque base while minimized or hidden', async () => {
+     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+     await import('../src/main.ts')
+@@ -1358,6 +1344,21 @@ describe('desktop main startup', () => {
+     expect(harness.menu.setApplicationMenu).toHaveBeenCalledTimes(3)
+   })
+ 
++  it('updates the Linux caption overlay from the primary document palette', async () => {
++    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
++    await import('../src/main.ts')
++    await harness.preparing.promise
++    const window = harness.windows[0]!
++    const listener = harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.windowsAppearance)![1]
++    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
++    listener(event, 'zh-CN', 'rgb(249, 250, 251)', '#0f1115')
++    expect(window.setTitleBarOverlay).toHaveBeenCalledWith({ color: 'rgb(249, 250, 251)', symbolColor: '#0f1115' })
++    window.setTitleBarOverlay.mockClear()
++    listener({ ...event, senderFrame: { url: 'dsh-app://unowned/index.html' } }, 'zh-CN', '#fff', '#000')
++    expect(window.setTitleBarOverlay).not.toHaveBeenCalled()
++    expect(harness.handlers.has(DESKTOP_IPC.windowsMenu)).toBe(true)
++  })
++
+   it('retains cached Chinese for a Host startup crash after the loading page reports English', async () => {
+     vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+     const directory = join(harness.app.getPath('userData'), 'desktop')
+@@ -1381,8 +1382,8 @@ describe('desktop main startup', () => {
+     expect((harness.dialog.showMessageBox.mock.calls[0]![0] as MessageBoxOptions).message).toBe(zh.fatalSummary)
+   })
+ 
+-  it('maps Windows caption menus to localized native commands and rejects foreign popup requests', async () => {
+-    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
++  it.each(['win32', 'linux'] as const)('maps caption menus on %s to localized native commands and rejects foreign popup requests', async (platform) => {
++    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+     await import('../src/main.ts')
+     await harness.preparing.promise
+     const window = harness.windows[0]!
+@@ -1396,8 +1397,10 @@ describe('desktop main startup', () => {
+     expect(() => handler(event, 'arbitrary-command', 48, 34)).toThrow('invalid popup request')
+     expect(() => handler(event, 'application', NaN, 34)).toThrow('invalid popup request')
+     const application = handler(event, 'application', 48, 34)
+-    expect(harness.menu.buildFromTemplate.mock.lastCall![0].map(item => item.label ?? item.type)).toEqual([
+-      '关于 DeepSeek Harness', 'separator', '设置…', 'separator', '检查更新…', '管理 dsh 命令…', 'separator', zh.toggleDevToolsMenu, 'separator', '退出',
++    expect(harness.menu.buildFromTemplate.mock.lastCall![0].map(item => item.label ?? item.role ?? item.type)).toEqual([
++      '关于 DeepSeek Harness', 'separator', '设置…', 'separator', '检查更新…',
++      ...platform === 'win32' ? ['管理 dsh 命令…'] : [],
++      'separator', zh.toggleDevToolsMenu, 'separator', platform === 'win32' ? '退出' : 'quit',
+     ])
+     expect(harness.popup.mock.lastCall![0]).toMatchObject({ window, x: 48, y: 34 })
+     expect(harness.popup.mock.lastCall![0].callback).toBeTypeOf('function')
+@@ -1419,8 +1422,8 @@ describe('desktop main startup', () => {
+     await edit
+   })
+ 
+-  it.each(['darwin', 'linux'] as const)('declares the platform application menus, with the product File, Edit, and Window menus on macOS (%s)', async (platform) => {
+-    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
++  it('declares the macOS application menus, with the product File, Edit, and Window menus', async () => {
++    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+     await import('../src/main.ts')
+     await harness.preparing.promise
+     const describeItem = (item: MenuItemConstructorOptions): string | undefined =>
+@@ -1429,27 +1432,36 @@ describe('desktop main startup', () => {
+       .map(call => call[0])
+       .find(items => items.some(item => item.role === 'editMenu'))
+     if (template === undefined) throw new Error('application menu missing')
+-    expect(template.map(describeItem)).toEqual(platform === 'darwin'
+-      ? ['Desktop test', en.fileMenu, 'editMenu', 'windowMenu']
+-      : ['Application', 'editMenu'])
++    expect(template.map(describeItem)).toEqual(['Desktop test', en.fileMenu, 'editMenu', 'windowMenu'])
+     const describeEdit = (items: MenuItemConstructorOptions[]): unknown[] => items.map(item => Array.isArray(item.submenu)
+       ? [describeItem(item), describeEdit(item.submenu)]
+       : [describeItem(item), item.accelerator, item.visible, item.acceleratorWorksWhenHidden].filter(value => value !== undefined))
+     const edit = template.find(item => item.role === 'editMenu')!.submenu as MenuItemConstructorOptions[] | undefined
+-    expect(edit === undefined ? undefined : describeEdit(edit)).toEqual(platform === 'darwin'
+-      ? [['undo'], ['redo'], ['separator'], ['cut'], ['copy'], ['paste'],
+-        ['pasteAndMatchStyle', 'Shift+Command+V'], ['pasteAndMatchStyle', 'Option+Shift+Command+V', false, true],
+-        ['delete'], ['selectAll'], ['separator'],
+-        [en.substitutionsMenu, [['showSubstitutions'], ['separator'], ['toggleSmartQuotes'], ['toggleSmartDashes'], ['toggleTextReplacement']]],
+-        [en.speechMenu, [['startSpeaking'], ['stopSpeaking']]]]
+-      : undefined)
++    expect(edit === undefined ? undefined : describeEdit(edit)).toEqual([['undo'], ['redo'], ['separator'], ['cut'], ['copy'], ['paste'],
++      ['pasteAndMatchStyle', 'Shift+Command+V'], ['pasteAndMatchStyle', 'Option+Shift+Command+V', false, true],
++      ['delete'], ['selectAll'], ['separator'],
++      [en.substitutionsMenu, [['showSubstitutions'], ['separator'], ['toggleSmartQuotes'], ['toggleSmartDashes'], ['toggleTextReplacement']]],
++      [en.speechMenu, [['startSpeaking'], ['stopSpeaking']]]])
+     const application = template[0]!.submenu as MenuItemConstructorOptions[]
+-    expect(application.filter(item => item.visible !== false).map(describeItem)).toEqual(platform === 'darwin'
+-      ? ['about', 'separator', en.settingsMenu, 'separator', en.checkUpdatesMenu, en.cliCommandMenu, 'separator', 'toggleDevTools', 'separator', 'hide', 'hideOthers', 'unhide', 'separator', 'quit']
+-      : ['about', 'separator', en.settingsMenu, 'separator', en.checkUpdatesMenu, 'separator', 'toggleDevTools', 'separator', 'quit'])
++    expect(application.filter(item => item.visible !== false).map(describeItem)).toEqual(['about', 'separator', en.settingsMenu,
++      'separator', en.checkUpdatesMenu, en.cliCommandMenu, 'separator', 'toggleDevTools', 'separator', 'hide', 'hideOthers', 'unhide',
++      'separator', 'quit'])
+     expect(harness.menu.setApplicationMenu).toHaveBeenCalledOnce()
+   })
+ 
++  it('uses the caption application menu on Linux instead of a native menu row', async () => {
++    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
++    await import('../src/main.ts')
++    await harness.preparing.promise
++    expect(harness.menu.setApplicationMenu).toHaveBeenCalled()
++    expect(harness.menu.buildFromTemplate.mock.calls[0]![0]).toEqual([
++      { role: 'toggleDevTools', visible: false },
++      { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
++    ])
++    expect(harness.handlers.has(DESKTOP_IPC.windowsMenu)).toBe(true)
++    expect(harness.ipcOn.mock.calls.some(([channel]) => channel === DESKTOP_IPC.windowsAppearance)).toBe(true)
++  })
++
+   it.each(['en-US', 'zh-CN'])('localizes macOS application commands without changing the application name (%s)', async (locale) => {
+     vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+     vi.spyOn(harness.app, 'getLocale').mockReturnValue(locale)
+diff --git a/apps/desktop/tests/preload-platform.client.spec.ts b/apps/desktop/tests/preload-platform.client.spec.ts
+index 5b876ab3..b8a747ce 100644
+--- a/apps/desktop/tests/preload-platform.client.spec.ts
++++ b/apps/desktop/tests/preload-platform.client.spec.ts
+@@ -12,13 +12,7 @@ afterEach(() => {
+   on.mockClear()
+ })
+ 
+-it.each(['linux'] as const)('subscribes no fullscreen channel on %s', (platform) => {
+-  vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+-  syncWindowFullscreen()
+-  expect(on).not.toHaveBeenCalled()
+-})
+-
+-it.each(['darwin', 'win32'] as const)('mirrors the sent fullscreen state onto html[data-fullscreen] on %s', (platform) => {
++it.each(['darwin', 'win32', 'linux'] as const)('mirrors the sent fullscreen state onto html[data-fullscreen] on %s', (platform) => {
+   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+   syncWindowFullscreen()
+   expect(on).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC.windowFullscreen, expect.any(Function))
+diff --git a/apps/desktop/tests/preload-windows.client.spec.ts b/apps/desktop/tests/preload-windows.client.spec.ts
+index e59b7ebb..4e5d77fd 100644
+--- a/apps/desktop/tests/preload-windows.client.spec.ts
++++ b/apps/desktop/tests/preload-windows.client.spec.ts
+@@ -17,15 +17,15 @@ afterEach(() => {
+   send.mockClear()
+ })
+ 
+-it.each(['darwin', 'linux'] as const)('does not install Windows controls on %s', (platform) => {
++it.each(['darwin'] as const)('does not install caption controls on %s', (platform) => {
+   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+   syncWindowsAppearance()
+   expect(document.documentElement.hasAttribute('data-windows-titlebar')).toBe(false)
+   expect(send).not.toHaveBeenCalled()
+ })
+ 
+-it('synchronizes live language and palette changes and stops observing a closed document', async () => {
+-  vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
++it.each(['win32', 'linux'] as const)('synchronizes live language and palette changes on %s and stops observing a closed document', async (platform) => {
++  vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+   vi.spyOn(document, 'readyState', 'get').mockReturnValue('loading')
+   vi.spyOn(globalThis, 'getComputedStyle').mockImplementation(() => ({
+     backgroundColor: document.body.hasAttribute('data-ds-dark-theme') ? 'oklch(0.2 0 0)' : 'hsl(0 0% 100%)',
 diff --git a/apps/desktop/tests/tray.spec.ts b/apps/desktop/tests/tray.spec.ts
 index 11c3a488..7afd8dbd 100644
 --- a/apps/desktop/tests/tray.spec.ts
@@ -327,6 +656,34 @@ index 11c3a488..7afd8dbd 100644
  it('opens the window on a single click and routes menu entries to the open and quit actions', () => {
    const f = setup()
    f.native.emit('click')
+diff --git a/apps/desktop/tests/update-dialog.spec.ts b/apps/desktop/tests/update-dialog.spec.ts
+index 29cbf832..4b82882b 100644
+--- a/apps/desktop/tests/update-dialog.spec.ts
++++ b/apps/desktop/tests/update-dialog.spec.ts
+@@ -84,6 +84,7 @@ it('accepts only a displayed choice from its isolated shell frame', async () =>
+ })
+ 
+ it('attaches within its owner and resizes below the Windows caption without a native child window', async () => {
++  vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+   const f = setup()
+   const pending = f.show()
+   const view = fixture.views[0]!
+diff --git a/apps/desktop/tests/update-overlay.spec.ts b/apps/desktop/tests/update-overlay.spec.ts
+index bd59d15d..137570c8 100644
+--- a/apps/desktop/tests/update-overlay.spec.ts
++++ b/apps/desktop/tests/update-overlay.spec.ts
+@@ -42,9 +42,9 @@ it('never shows or activates its native owner on visibility or background loadin
+   overlay.destroy()
+ })
+ 
+-it.each(['darwin', 'win32'] as const)('fits inside the owner with native caption clearance on %s', (platform) => {
++it.each(['darwin', 'win32', 'linux'] as const)('fits inside the owner with native caption clearance on %s', (platform) => {
+   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+-  const f = fixture(); const overlay = f.create(); const top = platform === 'win32' ? 40 : 0
++  const f = fixture(); const overlay = f.create(); const top = platform === 'darwin' ? 0 : 40
+   expect(f.views[0]!.setBounds).toHaveBeenCalledWith({ x: 0, y: top, width: 900, height: 650 - top })
+   f.parent.emit('resize'); expect(f.views[0]!.setBounds).toHaveBeenCalledTimes(2)
+   overlay.destroy()
 diff --git a/apps/desktop/tsdown.config.ts b/apps/desktop/tsdown.config.ts
 index ddf9c2d6..63287dbf 100644
 --- a/apps/desktop/tsdown.config.ts
