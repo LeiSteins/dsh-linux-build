@@ -111,6 +111,121 @@ index 4e338532..e24fcc89 100644
    if (pnpm === undefined) throw new Error('desktop runtime: primary-runtime manifest has no pnpm version')
    await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:cli', async () => { prepareCli(target) })
    writeFileSync(join(RUNTIME_ROOT, 'versions.json'), `${JSON.stringify({
+diff --git a/apps/desktop/src/caption-controls.ts b/apps/desktop/src/caption-controls.ts
+new file mode 100644
+index 00000000..8ccb7490
+--- /dev/null
++++ b/apps/desktop/src/caption-controls.ts
+@@ -0,0 +1,109 @@
++/** Linux caption window controls drawn in the renderer instead of Chromium's compact overlay. */
++
++import { ipcRenderer } from 'electron'
++import { DESKTOP_IPC } from './ipc.ts'
++import { resolveDesktopLocale } from './locale.ts'
++
++type WindowAction = 'minimize' | 'toggle-maximize' | 'close'
++
++const ICONS = {
++  minimize: '<line x1="0" y1="5.5" x2="10" y2="5.5"/>',
++  maximize: '<rect x="0.5" y="0.5" width="9" height="9"/>',
++  restore: '<path d="M2.5 0.5H9.5V7.5"/><path d="M0.5 2.5H7.5V9.5H0.5Z"/>',
++  close: '<line x1="0.5" y1="0.5" x2="9.5" y2="9.5"/><line x1="9.5" y1="0.5" x2="0.5" y2="9.5"/>',
++} as const
++
++function icon(name: keyof typeof ICONS): string {
++  return `<svg viewBox="0 0 10 10" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1">${ICONS[name]}</svg>`
++}
++
++/**
++ * Mount the caption buttons at the window's top-right edge. The renderer owns
++ * their size and spacing so Linux matches the Windows caption; the main process
++ * still owns the window actions and the current maximized state.
++ */
++export function installLinuxCaptionControls(): void {
++  if (process.platform !== 'linux') return
++
++  const host = document.createElement('div')
++  host.dataset.linuxCaptionControls = ''
++  const shadow = host.attachShadow({ mode: 'open' })
++  const style = document.createElement('style')
++  style.textContent = `
++    :host {
++      position: fixed; top: 0; right: 0; z-index: 1100;
++      height: var(--dsh-windows-titlebar-height, 40px);
++      display: flex; flex-direction: row;
++      -webkit-app-region: no-drag;
++    }
++    :host-context(html[data-fullscreen]) { display: none; }
++    button {
++      width: 46px; height: 100%; margin: 0; padding: 0; border: 0;
++      display: grid; place-items: center;
++      background: transparent; color: var(--dsw-alias-label-secondary);
++      cursor: default; -webkit-app-region: no-drag;
++    }
++    button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
++    button[data-close]:hover { background: #c42b1c; color: #ffffff; }
++    button:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: -2px; }
++    :host-context(html[data-input-modality='pointer']) button:focus-visible { outline-color: transparent; }
++    svg { display: block; }
++  `
++
++  const send = (action: WindowAction): void => {
++    void ipcRenderer.invoke(DESKTOP_IPC.windowControl, action).catch(() => {})
++  }
++  const createButton = (action: WindowAction): HTMLButtonElement => {
++    const button = document.createElement('button')
++    button.type = 'button'
++    button.addEventListener('click', () => { send(action) })
++    return button
++  }
++
++  const minimize = createButton('minimize')
++  const maximize = createButton('toggle-maximize')
++  const close = createButton('close')
++  close.dataset.close = ''
++  minimize.innerHTML = icon('minimize')
++  maximize.innerHTML = icon('maximize')
++  close.innerHTML = icon('close')
++
++  let maximized = false
++  const updateLabels = (): void => {
++    // A sandboxed preload can run before the HTML parser creates the document root.
++    const root = document.documentElement as HTMLElement | null
++    const { messages } = resolveDesktopLocale(root?.lang ?? '')
++    minimize.title = minimize.ariaLabel = messages.windowMinimize
++    maximize.title = maximize.ariaLabel = maximized ? messages.windowRestore : messages.windowMaximize
++    close.title = close.ariaLabel = messages.windowClose
++  }
++  const applyMaximized = (next: boolean): void => {
++    if (next === maximized) return
++    maximized = next
++    maximize.innerHTML = icon(next ? 'restore' : 'maximize')
++    updateLabels()
++  }
++
++  ipcRenderer.on(DESKTOP_IPC.windowMaximized, (_event, next: unknown) => {
++    if (typeof next === 'boolean') applyMaximized(next)
++  })
++
++  shadow.append(style, minimize, maximize, close)
++  let language: MutationObserver | undefined
++  const install = (): void => {
++    updateLabels()
++    const root = document.documentElement as HTMLElement | null
++    if (root !== null) {
++      language = new MutationObserver(updateLabels)
++      language.observe(root, { attributes: true, attributeFilter: ['lang'] })
++    }
++    document.body?.append(host)
++  }
++  if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', install, { once: true })
++  else install()
++
++  window.addEventListener('pagehide', () => {
++    language?.disconnect()
++    host.remove()
++  }, { once: true })
++}
 diff --git a/apps/desktop/src/client/WelcomePage.tsx b/apps/desktop/src/client/WelcomePage.tsx
 index 6a63dc72..55e9674c 100644
 --- a/apps/desktop/src/client/WelcomePage.tsx
@@ -124,8 +239,113 @@ index 6a63dc72..55e9674c 100644
      const takeNotice = (): void => {
        void api.takeNotice().then((notice) => {
          if (mounted.current && notice === 'session-expired') setExpiryNotice(true)
+diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
+index 83ebe741..911681ca 100644
+--- a/apps/desktop/src/ipc.ts
++++ b/apps/desktop/src/ipc.ts
+@@ -42,6 +42,8 @@ export const DESKTOP_IPC = {
+   updatesPresentation: 'dsh-desktop:updates-presentation',
+   nativeThemeSet: 'dsh-desktop:native-theme-set',
+   windowFullscreen: 'dsh-desktop:window-fullscreen',
++  windowControl: 'dsh-desktop:window-control',
++  windowMaximized: 'dsh-desktop:window-maximized',
+   windowsAppearance: 'dsh-desktop:windows-appearance',
+   windowsMenu: 'dsh-desktop:windows-menu',
+ } as const
+diff --git a/apps/desktop/src/locale.ts b/apps/desktop/src/locale.ts
+index ea261784..6ec83036 100644
+--- a/apps/desktop/src/locale.ts
++++ b/apps/desktop/src/locale.ts
+@@ -31,6 +31,10 @@ export const en = {
+   application: 'Application',
+   fileMenu: 'File',
+   closePage: 'Close Page or Window',
++  windowMinimize: 'Minimize',
++  windowMaximize: 'Maximize',
++  windowRestore: 'Restore',
++  windowClose: 'Close',
+   aboutMenu: 'About DeepSeek Harness',
+   settingsMenu: 'Settings…',
+   aboutProduct: 'DeepSeek Harness',
+@@ -227,6 +231,10 @@ export const zh = {
+   application: '应用',
+   fileMenu: '文件',
+   closePage: '关闭页面或窗口',
++  windowMinimize: '最小化',
++  windowMaximize: '最大化',
++  windowRestore: '还原',
++  windowClose: '关闭',
+   aboutMenu: '关于 DeepSeek Harness',
+   settingsMenu: '设置…',
+   aboutProduct: 'DeepSeek Harness',
+@@ -421,6 +429,10 @@ export const ja = {
+   application: 'アプリケーション',
+   fileMenu: 'ファイル',
+   closePage: 'ページまたはウィンドウを閉じる',
++  windowMinimize: '最小化',
++  windowMaximize: '最大化',
++  windowRestore: '元のサイズに戻す',
++  windowClose: '閉じる',
+   aboutMenu: 'DeepSeek Harness について',
+   settingsMenu: '設定…',
+   aboutProduct: 'DeepSeek Harness',
+@@ -615,6 +627,10 @@ export const es = {
+   application: 'Solicitud',
+   fileMenu: 'Archivo',
+   closePage: 'Cerrar página o ventana',
++  windowMinimize: 'Minimizar',
++  windowMaximize: 'Maximizar',
++  windowRestore: 'Restaurar',
++  windowClose: 'Cerrar',
+   aboutMenu: 'Acerca de DeepSeek Harness',
+   settingsMenu: 'Configuración…',
+   aboutProduct: 'DeepSeek Harness',
+@@ -809,6 +825,10 @@ export const fr = {
+   application: 'Application',
+   fileMenu: 'Fichier',
+   closePage: 'Fermer la page ou la fenêtre',
++  windowMinimize: 'Réduire',
++  windowMaximize: 'Agrandir',
++  windowRestore: 'Restaurer',
++  windowClose: 'Fermer',
+   aboutMenu: 'À propos de DeepSeek Harness',
+   settingsMenu: 'Paramètres…',
+   aboutProduct: 'DeepSeek Harness',
+@@ -1003,6 +1023,10 @@ export const de = {
+   application: 'Anwendung',
+   fileMenu: 'Datei',
+   closePage: 'Seite oder Fenster schließen',
++  windowMinimize: 'Minimieren',
++  windowMaximize: 'Maximieren',
++  windowRestore: 'Wiederherstellen',
++  windowClose: 'Schließen',
+   aboutMenu: 'Über DeepSeek Harness',
+   settingsMenu: 'Einstellungen…',
+   aboutProduct: 'DeepSeek Harness',
+@@ -1197,6 +1221,10 @@ export const ru = {
+   application: 'Приложение',
+   fileMenu: 'Файл',
+   closePage: 'Закрыть страницу или окно',
++  windowMinimize: 'Свернуть',
++  windowMaximize: 'Развернуть',
++  windowRestore: 'Восстановить',
++  windowClose: 'Закрыть',
+   aboutMenu: 'О DeepSeek Harness',
+   settingsMenu: 'Настройки…',
+   aboutProduct: 'DeepSeek Harness',
+@@ -1391,6 +1419,10 @@ export const pt = {
+   application: 'Aplicativo',
+   fileMenu: 'Arquivo',
+   closePage: 'Fechar página ou janela',
++  windowMinimize: 'Minimizar',
++  windowMaximize: 'Maximizar',
++  windowRestore: 'Restaurar',
++  windowClose: 'Fechar',
+   aboutMenu: 'Sobre DeepSeek Harness',
+   settingsMenu: 'Configurações…',
+   aboutProduct: 'DeepSeek Harness',
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 291ed084..dbec77f1 100644
+index 291ed084..fada5580 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -72,6 +72,10 @@ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
@@ -158,7 +378,7 @@ index 291ed084..dbec77f1 100644
    return { node, nodeBin, pnpm, dsh }
  }
  
-@@ -268,7 +275,9 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+@@ -268,11 +275,17 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
      minWidth: 520,
      minHeight: 600,
      show,
@@ -168,8 +388,18 @@ index 291ed084..dbec77f1 100644
 +    ...(usesTitleBarOverlay && primary ? {
        backgroundColor: chromeFallbackFill(),
        titleBarStyle: 'hidden' as const,
-       titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
-@@ -299,7 +308,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+-      titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
+-        symbolColor: nativeTheme.shouldUseDarkColors ? '#f9fafb' : '#0f1115' },
++      // Windows keeps its native overlay controls; Linux draws the caption buttons
++      // in the renderer so they match the Windows size and spacing.
++      ...(process.platform === 'win32' ? {
++        titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
++          symbolColor: nativeTheme.shouldUseDarkColors ? '#f9fafb' : '#0f1115' },
++      } : {}),
+     } : {}),
+     // hiddenInset places traffic lights inside the sidebar; sidebar vibrancy
+     // needs a transparent window background to show through the page.
+@@ -299,7 +312,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
      if (['http:', 'https:'].includes(new URL(url).protocol)) void shell.openExternal(url)
      return { action: 'deny' }
    })
@@ -178,7 +408,7 @@ index 291ed084..dbec77f1 100644
      // Fullscreen hides native window controls; overlays drop their caption clearance.
      const sendFullscreen = (): void => {
        if (!window.isDestroyed()) window.webContents.send(DESKTOP_IPC.windowFullscreen, window.isFullScreen())
-@@ -310,7 +319,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+@@ -310,13 +323,22 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
      // current state so a fullscreen reload does not fall back to windowed CSS.
      window.webContents.on('did-finish-load', sendFullscreen)
    }
@@ -187,7 +417,22 @@ index 291ed084..dbec77f1 100644
      const updateBackground = (): void => {
        if (!window.isDestroyed()) window.setBackgroundColor(chromeFallbackFill())
      }
-@@ -472,7 +481,7 @@ async function main(): Promise<void> {
+     nativeTheme.on('updated', updateBackground)
+     window.once('closed', () => { nativeTheme.removeListener('updated', updateBackground) })
+   }
++  if (process.platform === 'linux' && primary) {
++    // The renderer-owned caption swaps its maximize and restore glyphs from this state.
++    const sendMaximized = (): void => {
++      if (!window.isDestroyed()) window.webContents.send(DESKTOP_IPC.windowMaximized, window.isMaximized())
++    }
++    window.on('maximize', sendMaximized)
++    window.on('unmaximize', sendMaximized)
++    window.webContents.on('did-finish-load', sendMaximized)
++  }
+   if (process.platform === 'darwin') {
+     // Deminiaturize reattaches the NSVisualEffectView material late
+     // (electron/electron#25368), so a transparent window shows the desktop
+@@ -472,7 +494,7 @@ async function main(): Promise<void> {
    // Copy comes from the same locale as the update prompts so the dialog
    // chrome and its content never mix languages.
    const showAbout = async (): Promise<void> => {
@@ -196,7 +441,7 @@ index 291ed084..dbec77f1 100644
        detail: formatDesktopMessage(locale.messages.aboutVersion, { version: app.getVersion() }),
        buttons: [locale.messages.updateAcknowledge], cancelId: 0 })
    }
-@@ -1164,7 +1173,7 @@ async function main(): Promise<void> {
+@@ -1164,7 +1186,7 @@ async function main(): Promise<void> {
    const applicationIconPath = development ? join(app.getAppPath(), 'resources', 'icon-windows.png')
      : join(process.resourcesPath, 'icon.png')
    app.setAboutPanelOptions({
@@ -205,7 +450,7 @@ index 291ed084..dbec77f1 100644
      applicationVersion: app.getVersion(),
      // The release has no separate build number; omit Electron's bundle version.
      version: '',
-@@ -1241,7 +1250,7 @@ async function main(): Promise<void> {
+@@ -1241,7 +1263,7 @@ async function main(): Promise<void> {
      devToolsF12Shortcut,
    ]
    const refreshApplicationMenu = (): void => {
@@ -214,7 +459,7 @@ index 291ed084..dbec77f1 100644
        ? windowsDevToolsShortcuts : [{
          label: darwin ? app.name : currentDesktopLocale().messages.application,
          submenu: [...applicationItems(), devToolsF12Shortcut],
-@@ -1249,8 +1258,9 @@ async function main(): Promise<void> {
+@@ -1249,8 +1271,9 @@ async function main(): Promise<void> {
      tray?.relabel()
    }
    refreshApplicationMenu()
@@ -226,7 +471,7 @@ index 291ed084..dbec77f1 100644
      // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
      try {
        tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
-@@ -1274,7 +1284,7 @@ async function main(): Promise<void> {
+@@ -1274,7 +1297,7 @@ async function main(): Promise<void> {
      ...(process.platform === 'win32' ? { icon: nativeImage.createFromPath(trayIconPath) } : {}),
    })
  
@@ -235,7 +480,39 @@ index 291ed084..dbec77f1 100644
      ipcMain.handle(DESKTOP_IPC.windowsMenu, (event, name: unknown, x: unknown, y: unknown) => {
        assertDesktopSender(event, ['app'])
        if (mainWindow === undefined || event.sender !== mainWindow.webContents
-@@ -1381,7 +1391,7 @@ async function main(): Promise<void> {
+@@ -1307,6 +1330,19 @@ async function main(): Promise<void> {
+         Menu.buildFromTemplate(items).popup({ window, x: Math.round(x * zoom), y: Math.round(y * zoom), callback: resolve })
+       })
+     })
++    if (process.platform === 'linux') {
++      ipcMain.handle(DESKTOP_IPC.windowControl, (event, action: unknown) => {
++        assertDesktopSender(event, ['app'])
++        if (mainWindow === undefined || event.sender !== mainWindow.webContents
++          || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('desktop window control: rejected sender')
++        if (action === 'minimize') mainWindow.minimize()
++        else if (action === 'toggle-maximize') {
++          if (mainWindow.isMaximized()) mainWindow.unmaximize()
++          else mainWindow.maximize()
++        } else if (action === 'close') mainWindow.close()
++        else throw new Error('desktop window control: invalid action')
++      })
++    }
+     ipcMain.on(DESKTOP_IPC.windowsAppearance, (event, _language: unknown, color: unknown, symbolColor: unknown) => {
+       if (mainWindow === undefined || event.sender !== mainWindow.webContents
+         || event.senderFrame !== mainWindow.webContents.mainFrame) return
+@@ -1315,7 +1351,10 @@ async function main(): Promise<void> {
+       // Empty colors precede client stylesheet installation; only CSS color values cross IPC.
+       const validColor = (value: unknown): value is string => typeof value === 'string'
+         && /^(?:#[\da-f]{3,8}|rgba?\([\d.,%\s]+\))$/iu.test(value)
+-      if (validColor(color) && validColor(symbolColor)) mainWindow.setTitleBarOverlay({ color, symbolColor })
++      // Linux draws its own caption controls, so only Windows updates the native overlay.
++      if (process.platform === 'win32' && validColor(color) && validColor(symbolColor)) {
++        mainWindow.setTitleBarOverlay({ color, symbolColor })
++      }
+     })
+   }
+ 
+@@ -1381,7 +1420,7 @@ async function main(): Promise<void> {
      const window = mainWindow ?? createMainWindow()
      await navigateMain(applicationUrl)
      if (isQuitting() || recovery.active || window.isDestroyed()) return
@@ -244,6 +521,26 @@ index 291ed084..dbec77f1 100644
      if (activate) window.show()
      else window.showInactive()
      const wasInWorkspace = enteredWorkspace
+diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
+index 6b4e9896..cdba9a59 100644
+--- a/apps/desktop/src/preload-app.ts
++++ b/apps/desktop/src/preload-app.ts
+@@ -9,6 +9,7 @@ import { PLATFORM_IPC } from './platform-ipc.ts'
+ import { markDocumentPlatform, syncWindowFullscreen } from './preload-platform.ts'
+ import { syncNativeTheme } from './preload-theme.ts'
+ import { syncWindowsAppearance } from './preload-windows.ts'
++import { installLinuxCaptionControls } from './caption-controls.ts'
+ import { installMandatoryUpdateOverlay } from './preload-mandatory-overlay.ts'
+ import { createDesktopBrowserBridge } from './preload-browser.ts'
+ import type { FileDragHandle } from '@deepseek-ai/dsh-util-file-drag'
+@@ -100,6 +101,7 @@ if (location.protocol === `${SCHEME}:` && location.hostname === 'app') {
+     else body.setAttribute('tabindex', previous)
+   })
+   syncWindowsAppearance()
++  if (process.platform === 'linux') installLinuxCaptionControls()
+   if (process.platform === 'win32') installMandatoryUpdateOverlay()
+   contextBridge.exposeInMainWorld('__DSH_DIRECTORY_PICKER__', {
+     pick: () => ipcRenderer.invoke(DESKTOP_IPC.directoryPick) as Promise<string | null>,
 diff --git a/apps/desktop/src/preload-platform.ts b/apps/desktop/src/preload-platform.ts
 index 1e197b0c..24f0777f 100644
 --- a/apps/desktop/src/preload-platform.ts
@@ -343,6 +640,52 @@ index 61fda9e3..d5457a11 100644
    disposeActiveHandlers?.()
    let active = true
    const disposeHandlers = (): void => {
+diff --git a/apps/desktop/tests/caption-controls.client.spec.ts b/apps/desktop/tests/caption-controls.client.spec.ts
+new file mode 100644
+index 00000000..7a855f21
+--- /dev/null
++++ b/apps/desktop/tests/caption-controls.client.spec.ts
+@@ -0,0 +1,40 @@
++// @vitest-environment jsdom
++import { afterEach, expect, it, vi } from 'vitest'
++import { DESKTOP_IPC } from '../src/ipc.ts'
++import { installLinuxCaptionControls } from '../src/caption-controls.ts'
++
++const { on, invoke } = vi.hoisted(() => ({ on: vi.fn(), invoke: vi.fn(async () => undefined) }))
++vi.mock('electron', () => ({ ipcRenderer: { on, invoke } }))
++
++afterEach(() => {
++  document.querySelector('[data-linux-caption-controls]')?.remove()
++  on.mockClear()
++  invoke.mockClear()
++  vi.restoreAllMocks()
++})
++
++it('mounts before the document root exists', () => {
++  vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
++  vi.spyOn(document, 'documentElement', 'get').mockReturnValue(null)
++  expect(() => installLinuxCaptionControls()).not.toThrow()
++  expect(document.querySelector('[data-linux-caption-controls]')).not.toBeNull()
++})
++
++it('invokes the window actions and swaps the maximize glyph', () => {
++  vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
++  installLinuxCaptionControls()
++  const host = document.querySelector<HTMLElement>('[data-linux-caption-controls]')!
++  const buttons = [...host.shadowRoot!.querySelectorAll('button')]
++  for (const button of buttons) button.click()
++  expect(invoke.mock.calls).toEqual([
++    [DESKTOP_IPC.windowControl, 'minimize'],
++    [DESKTOP_IPC.windowControl, 'toggle-maximize'],
++    [DESKTOP_IPC.windowControl, 'close'],
++  ])
++  const handler = on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.windowMaximized)![1] as
++    (event: unknown, maximized: boolean) => void
++  handler({}, true)
++  expect(buttons[1]!.innerHTML).toContain('M2.5 0.5H9.5V7.5')
++  handler({}, false)
++  expect(buttons[1]!.innerHTML).toContain('width="9" height="9"')
++})
 diff --git a/apps/desktop/tests/fixtures/pnpm-smoke.mjs b/apps/desktop/tests/fixtures/pnpm-smoke.mjs
 index 5d16769a..e6ef261d 100644
 --- a/apps/desktop/tests/fixtures/pnpm-smoke.mjs
@@ -371,10 +714,22 @@ index 5d16769a..e6ef261d 100644
  assert.equal(typeof require('internal/modules/esm/loader').getOrInitializeCascadedLoader, 'function')
  console.log('desktop-node-script-ok')
 diff --git a/apps/desktop/tests/main-startup.spec.ts b/apps/desktop/tests/main-startup.spec.ts
-index e689f3e6..51ae871e 100644
+index e689f3e6..248a7ba8 100644
 --- a/apps/desktop/tests/main-startup.spec.ts
 +++ b/apps/desktop/tests/main-startup.spec.ts
-@@ -837,7 +837,7 @@ describe('desktop main startup', () => {
+@@ -121,6 +121,11 @@ const harness = await vi.hoisted(async () => {
+     readonly setFullScreen = vi.fn((flag: boolean) => { this.fullscreen = flag; this.emit(flag ? 'enter-full-screen' : 'leave-full-screen') })
+     minimized = false
+     isMinimized() { return this.minimized }
++    minimize = vi.fn(() => { this.minimized = true; this.emit('minimize') })
++    maximized = false
++    isMaximized() { return this.maximized }
++    maximize = vi.fn(() => { this.maximized = true; this.emit('maximize') })
++    unmaximize = vi.fn(() => { this.maximized = false; this.emit('unmaximize') })
+     visible = true
+     isVisible() { return this.visible }
+     enabled = true
+@@ -837,7 +842,7 @@ describe('desktop main startup', () => {
      expect(visible.filter(item => item.role === 'toggleDevTools')).toEqual([
        { role: 'toggleDevTools', label: messages.toggleDevToolsMenu },
      ])
@@ -383,7 +738,7 @@ index e689f3e6..51ae871e 100644
        expect(harness.menu.mock.calls[0]![0]).toEqual([
          { role: 'toggleDevTools', visible: false },
          { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
-@@ -853,7 +853,7 @@ describe('desktop main startup', () => {
+@@ -853,7 +858,7 @@ describe('desktop main startup', () => {
      harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.localeChanged)![1](
        { sender, senderFrame: sender.mainFrame }, nextLocale,
      )
@@ -392,7 +747,7 @@ index e689f3e6..51ae871e 100644
        : harness.menu.mock.lastCall![0][0]!.submenu as MenuItemConstructorOptions[]
      expect(refreshed.filter(item => item.role === 'toggleDevTools' && item.visible !== false)).toEqual([
        { role: 'toggleDevTools', label: nextLocale === 'en' ? en.toggleDevToolsMenu : zh.toggleDevToolsMenu },
-@@ -1154,7 +1154,7 @@ describe('desktop main startup', () => {
+@@ -1154,7 +1159,7 @@ describe('desktop main startup', () => {
      }
    })
  
@@ -401,26 +756,24 @@ index e689f3e6..51ae871e 100644
      vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
      await import('../src/main.ts')
      await harness.preparing.promise
-@@ -1162,17 +1162,13 @@ describe('desktop main startup', () => {
-     expect(window.urls).toEqual(['dsh-app://app/'])
-     if (platform === 'darwin') {
-       expect(window.options).toMatchObject({ titleBarStyle: 'hiddenInset', vibrancy: 'sidebar', backgroundColor: '#00000000' })
--    } else if (platform === 'win32') {
-+    } else if (platform === 'win32' || platform === 'linux') {
-       expect(window.options).toMatchObject({ titleBarStyle: 'hidden', titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT } })
-       expect(window.options).not.toHaveProperty('vibrancy')
-       expect(harness.menu.mock.calls[0]![0]).toEqual([
-         { role: 'toggleDevTools', visible: false },
+@@ -1170,9 +1175,14 @@ describe('desktop main startup', () => {
          { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
        ])
--    } else {
+     } else {
 -      expect(window.options).not.toHaveProperty('backgroundColor')
 -      expect(window.options).not.toHaveProperty('titleBarStyle')
--      expect(window.options).not.toHaveProperty('vibrancy')
++      // Linux hides the native title bar but draws the caption buttons in the renderer.
++      expect(window.options).toMatchObject({ titleBarStyle: 'hidden' })
++      expect(window.options).not.toHaveProperty('titleBarOverlay')
+       expect(window.options).not.toHaveProperty('vibrancy')
++      expect(harness.menu.mock.calls[0]![0]).toEqual([
++        { role: 'toggleDevTools', visible: false },
++        { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
++      ])
      }
      expect(harness.hosts).toHaveLength(0)
    })
-@@ -1253,7 +1249,7 @@ describe('desktop main startup', () => {
+@@ -1253,7 +1263,7 @@ describe('desktop main startup', () => {
      expect((await handler(new Request('dsh-app://foreign/index.html'))).status).toBe(404)
    })
  
@@ -429,7 +782,7 @@ index e689f3e6..51ae871e 100644
      vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
      await import('../src/main.ts')
      await harness.preparing.promise
-@@ -1276,16 +1272,6 @@ describe('desktop main startup', () => {
+@@ -1276,16 +1286,6 @@ describe('desktop main startup', () => {
      expect(sent()).toHaveLength(relayed)
    })
  
@@ -446,11 +799,11 @@ index e689f3e6..51ae871e 100644
    it('covers the macOS vibrancy reattach gap with an opaque base while minimized or hidden', async () => {
      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
      await import('../src/main.ts')
-@@ -1358,6 +1344,21 @@ describe('desktop main startup', () => {
+@@ -1358,6 +1358,42 @@ describe('desktop main startup', () => {
      expect(harness.menu.setApplicationMenu).toHaveBeenCalledTimes(3)
    })
  
-+  it('updates the Linux caption overlay from the primary document palette', async () => {
++  it('registers the Linux caption controls without the native overlay', async () => {
 +    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
 +    await import('../src/main.ts')
 +    await harness.preparing.promise
@@ -458,17 +811,38 @@ index e689f3e6..51ae871e 100644
 +    const listener = harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.windowsAppearance)![1]
 +    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
 +    listener(event, 'zh-CN', 'rgb(249, 250, 251)', '#0f1115')
-+    expect(window.setTitleBarOverlay).toHaveBeenCalledWith({ color: 'rgb(249, 250, 251)', symbolColor: '#0f1115' })
-+    window.setTitleBarOverlay.mockClear()
-+    listener({ ...event, senderFrame: { url: 'dsh-app://unowned/index.html' } }, 'zh-CN', '#fff', '#000')
 +    expect(window.setTitleBarOverlay).not.toHaveBeenCalled()
++    expect(harness.handlers.has(DESKTOP_IPC.windowControl)).toBe(true)
 +    expect(harness.handlers.has(DESKTOP_IPC.windowsMenu)).toBe(true)
++  })
++
++  it('drives the Linux caption actions and reports the maximized state', async () => {
++    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
++    await import('../src/main.ts')
++    await harness.preparing.promise
++    const window = harness.windows[0]!
++    const sent = (channel: string): unknown[] => window.webContents.send.mock.calls
++      .filter(([name]) => name === channel).map(([, value]) => value)
++    window.maximized = true
++    window.emit('maximize')
++    window.maximized = false
++    window.emit('unmaximize')
++    expect(sent(DESKTOP_IPC.windowMaximized)).toEqual([true, false])
++    invoke(DESKTOP_IPC.windowControl, 'app', 'minimize')
++    expect(window.minimize).toHaveBeenCalledOnce()
++    invoke(DESKTOP_IPC.windowControl, 'app', 'toggle-maximize')
++    expect(window.maximize).toHaveBeenCalledOnce()
++    invoke(DESKTOP_IPC.windowControl, 'app', 'toggle-maximize')
++    expect(window.unmaximize).toHaveBeenCalledOnce()
++    const close = vi.spyOn(window, 'close')
++    invoke(DESKTOP_IPC.windowControl, 'app', 'close')
++    expect(close).toHaveBeenCalledOnce()
 +  })
 +
    it('retains cached Chinese for a Host startup crash after the loading page reports English', async () => {
      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
      const directory = join(harness.app.getPath('userData'), 'desktop')
-@@ -1381,8 +1382,8 @@ describe('desktop main startup', () => {
+@@ -1381,8 +1417,8 @@ describe('desktop main startup', () => {
      expect((harness.dialog.showMessageBox.mock.calls[0]![0] as MessageBoxOptions).message).toBe(zh.fatalSummary)
    })
  
@@ -479,7 +853,7 @@ index e689f3e6..51ae871e 100644
      await import('../src/main.ts')
      await harness.preparing.promise
      const window = harness.windows[0]!
-@@ -1396,8 +1397,10 @@ describe('desktop main startup', () => {
+@@ -1396,8 +1432,10 @@ describe('desktop main startup', () => {
      expect(() => handler(event, 'arbitrary-command', 48, 34)).toThrow('invalid popup request')
      expect(() => handler(event, 'application', NaN, 34)).toThrow('invalid popup request')
      const application = handler(event, 'application', 48, 34)
@@ -492,7 +866,7 @@ index e689f3e6..51ae871e 100644
      ])
      expect(harness.popup.mock.lastCall![0]).toMatchObject({ window, x: 48, y: 34 })
      expect(harness.popup.mock.lastCall![0].callback).toBeTypeOf('function')
-@@ -1419,8 +1422,8 @@ describe('desktop main startup', () => {
+@@ -1419,8 +1457,8 @@ describe('desktop main startup', () => {
      await edit
    })
  
@@ -503,7 +877,7 @@ index e689f3e6..51ae871e 100644
      await import('../src/main.ts')
      await harness.preparing.promise
      const describeItem = (item: MenuItemConstructorOptions): string | undefined =>
-@@ -1429,27 +1432,36 @@ describe('desktop main startup', () => {
+@@ -1429,27 +1467,36 @@ describe('desktop main startup', () => {
        .map(call => call[0])
        .find(items => items.some(item => item.role === 'editMenu'))
      if (template === undefined) throw new Error('application menu missing')
