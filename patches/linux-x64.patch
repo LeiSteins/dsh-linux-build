@@ -1092,6 +1092,52 @@ index ddf9c2d6..63287dbf 100644
          build: {
            outDir: 'lib/welcome',
            emptyOutDir: true,
+diff --git a/packages/client/ui-brand-official/src/client/index.ts b/packages/client/ui-brand-official/src/client/index.ts
+index e5dc78b0..a706549c 100644
+--- a/packages/client/ui-brand-official/src/client/index.ts
++++ b/packages/client/ui-brand-official/src/client/index.ts
+@@ -1,4 +1,4 @@
+-/** Official DeepSeek Harness occupants: the profile-gated sidebar brand slots and the home whale frame layer. */
++/** DeepSeek Harness sidebar branding and the home whale frame layer. */
+ import type { Context as ClientContext } from '@deepseek-ai/cordis'
+ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+@@ -18,7 +18,7 @@ export function apply(ctx: ClientContext): void {
+     name: 'conversation.hero.frame',
+     id: 'pixel-whale',
+   }, PixelWhale))
+-  if (process.env.DSH_CLIENT_BUILD_PROFILE !== 'official') return
++  if (process.env.DSH_CLIENT_BUILD_PROFILE !== 'official' && document.documentElement.dataset.platform !== 'linux') return
+   ctx.slots.inject('sidebar.brand.mark', () =>
+     ctx.slots.inject('sidebar.brand.name', function* () {
+       yield ctx.slots.register({ name: 'sidebar.brand.mark' }, OfficialBrandMark)
+diff --git a/packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx b/packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx
+index 306023be..4086b2b5 100644
+--- a/packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx
++++ b/packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx
+@@ -9,6 +9,7 @@ import { apply as hostApply } from '../src/index.ts'
+ 
+ afterEach(() => {
+   cleanup()
++  delete document.documentElement.dataset.platform
+   vi.unstubAllEnvs()
+   vi.restoreAllMocks()
+   vi.unstubAllGlobals()
+@@ -55,8 +56,12 @@ describe('official browser-brand plugin', () => {
+     expect(subject.slots.entries('conversation.hero.frame')).toHaveLength(1)
+   })
+ 
+-  it('fills declarations before or after apply and removes every occupant on teardown', async () => {
+-    vi.stubEnv('DSH_CLIENT_BUILD_PROFILE', 'official')
++  it.each([
++    { profile: 'official', platform: undefined },
++    { profile: 'local', platform: 'linux' },
++  ])('fills and removes brand slots for profile $profile on platform $platform', async ({ profile, platform }) => {
++    vi.stubEnv('DSH_CLIENT_BUILD_PROFILE', profile)
++    if (platform !== undefined) document.documentElement.dataset.platform = platform
+     const before = await bench()
+     const fiber = before.ctx.plugin({ inject: [...inject], apply })
+     await fiber.await()
 diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
 index 2be8c621..22ec06ce 100644
 --- a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
