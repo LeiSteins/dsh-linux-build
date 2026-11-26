@@ -125,7 +125,7 @@ index 6a63dc72..55e9674c 100644
        void api.takeNotice().then((notice) => {
          if (mounted.current && notice === 'session-expired') setExpiryNotice(true)
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 291ed084..813362f8 100644
+index 291ed084..27a26164 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -72,6 +72,8 @@ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
@@ -161,7 +161,7 @@ index 291ed084..813362f8 100644
      minHeight: 600,
      show,
 +    ...(process.platform === 'linux' && app.isPackaged
-+      ? { title: linuxProductName, icon: join(process.resourcesPath, 'icon.png') } : {}),
++      ? { title: linuxProductName ?? 'DeepSeek Harness', icon: join(process.resourcesPath, 'icon.png') } : {}),
      ...(process.platform === 'win32' && primary ? {
        backgroundColor: chromeFallbackFill(),
        titleBarStyle: 'hidden' as const,
@@ -184,7 +184,7 @@ index 291ed084..813362f8 100644
      // The release has no separate build number; omit Electron's bundle version.
      version: '',
 diff --git a/apps/desktop/src/welcome-window.ts b/apps/desktop/src/welcome-window.ts
-index 61fda9e3..7647404b 100644
+index 61fda9e3..d5457a11 100644
 --- a/apps/desktop/src/welcome-window.ts
 +++ b/apps/desktop/src/welcome-window.ts
 @@ -58,7 +58,9 @@ let disposeActiveHandlers: (() => void) | undefined
@@ -193,7 +193,7 @@ index 61fda9e3..7647404b 100644
    const options = welcomeWindowOptions(process.platform, locale)
 -  const window = new BrowserWindow(options)
 +  const window = new BrowserWindow(process.platform === 'linux' && app.isPackaged
-+    ? { ...options, title: process.env.DSH_CLIENT_TITLE ?? options.title, icon: join(process.resourcesPath, 'icon.png') }
++    ? { ...options, title: process.env.DSH_CLIENT_TITLE ?? locale.messages.welcomeTitle, icon: join(process.resourcesPath, 'icon.png') }
 +    : options)
    disposeActiveHandlers?.()
    let active = true
