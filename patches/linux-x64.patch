@@ -1,0 +1,162 @@
+diff --git a/apps/desktop/scripts/desktop-build-paths.mjs b/apps/desktop/scripts/desktop-build-paths.mjs
+index edfd9cdf..d935606a 100644
+--- a/apps/desktop/scripts/desktop-build-paths.mjs
++++ b/apps/desktop/scripts/desktop-build-paths.mjs
+@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path'
+ 
+ const APP_ROOT = resolve(import.meta.dirname, '..')
+ const BUILD_ROOT = join(APP_ROOT, '.desktop-build')
+-const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
++const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'])
+ 
+ /**
+  * Resolve the fixed build target selected by a packaging environment.
+@@ -79,6 +79,7 @@ export function desktopTargetPlatform(target) {
+     'mac-arm64': { platform: 'darwin', arch: 'arm64' },
+     'mac-x64': { platform: 'darwin', arch: 'x64' },
+     'win-x64': { platform: 'win32', arch: 'x64' },
++    'linux-x64': { platform: 'linux', arch: 'x64' },
+   })
+   return targets[target]
+ }
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index a777a058..48b636c6 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -66,7 +66,7 @@ export function createElectronBuilderConfig(
+   if (skipNotarization && (unsigned || resolvedPlatform !== 'darwin')) throw new Error('Skipping notarization requires a signed macOS build')
+   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
+   const packagesWindows = resolvedPlatform === 'win32'
+-  const policy = packagesMacOS && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
++  const policy = (packagesMacOS || resolvedPlatform === 'linux') && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
+   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
+   const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
+   if (packagesMacOS && !unsigned && !skipNotarization) resolveMacOSNotarizationEnvironment(env)
+diff --git a/apps/desktop/scripts/prepare-cli.ts b/apps/desktop/scripts/prepare-cli.ts
+index d2b9e142..5e78ecf5 100644
+--- a/apps/desktop/scripts/prepare-cli.ts
++++ b/apps/desktop/scripts/prepare-cli.ts
+@@ -8,10 +8,10 @@ import { join } from 'node:path'
+  * @param destination - Physical runtime/cli directory prepared for the application.
+  * @param platform - Target Desktop operating system.
+  */
+-export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32'): void {
++export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32' | 'linux'): void {
+   const name = platform === 'win32' ? 'dsh.cmd' : 'dsh'
+   const command = join(destination, 'bin', name)
+   mkdirSync(join(destination, 'bin'), { recursive: true })
+-  copyFileSync(join(import.meta.dirname, '..', 'cli', name), command)
+-  if (platform === 'darwin') chmodSync(command, 0o755)
++  copyFileSync(join(import.meta.dirname, '..', 'cli', platform === 'linux' ? 'dsh-linux' : name), command)
++  if (platform !== 'win32') chmodSync(command, 0o755)
+ }
+diff --git a/apps/desktop/scripts/prepare-dsh.ts b/apps/desktop/scripts/prepare-dsh.ts
+index a0698880..d920b323 100644
+--- a/apps/desktop/scripts/prepare-dsh.ts
++++ b/apps/desktop/scripts/prepare-dsh.ts
+@@ -44,7 +44,9 @@ const STORE_ROOT = BUILD_PATHS.pnpmStore
+ const RUNTIME_ROOT = BUILD_PATHS.runtime
+ const PNPM_BUILD_STATE = BUILD_PATHS.dshPnpm
+ const PACKAGE_SET_ROOT = BUILD_PATHS.packageSet
+-const NODE = join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
++const NODE = process.platform === 'linux'
++  ? join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'node', 'bin', 'node')
++  : join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
+ const PNPM = join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+ 
+ function manifestVersion(path: string, subject: string): string {
+diff --git a/apps/desktop/scripts/prepare-runtime.ts b/apps/desktop/scripts/prepare-runtime.ts
+--- a/apps/desktop/scripts/prepare-runtime.ts
++++ b/apps/desktop/scripts/prepare-runtime.ts
+@@ -27,7 +27,7 @@
+     () => downloadArtifact({ version, platform, arch, artifactName: 'electron', cacheRoot: BUILD_PATHS.downloads }))
+   rmSync(BUILD_PATHS.electron, { recursive: true, force: true })
+   await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'extract:electron', () => extractZip(archive, { dir: BUILD_PATHS.electron }))
+-  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
++  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : platform === 'linux' ? 'electron' : 'Electron.app/Contents/MacOS/Electron')
+   return execFileSync(executable, ['-p', 'process.versions.node'], {
+     encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+   }).trim()
+@@ -65,7 +65,11 @@
+     nodeVersion = await prepareElectron(target)
+     await preparePrimary()
+   }
+-  const { pnpm } = await readPrimaryRuntime(join(RUNTIME_ROOT, 'primary-runtime'))
++  const { pnpm, node } = await readPrimaryRuntime(join(RUNTIME_ROOT, 'primary-runtime'))
++  if (target.platform === 'linux') {
++    if (node === undefined) throw new Error('desktop runtime: primary-runtime manifest has no Node.js version')
++    nodeVersion = node
++  }
+   if (pnpm === undefined) throw new Error('desktop runtime: primary-runtime manifest has no pnpm version')
+   await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:cli', async () => { prepareCli(target) })
+   writeFileSync(join(RUNTIME_ROOT, 'versions.json'), `${JSON.stringify({
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 291ed084..8a22c614 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -207,13 +207,16 @@ interface RuntimeResources {
+ 
+ function runtimeResources(): RuntimeResources {
+   const development = !app.isPackaged
+-  const node = process.execPath
++  const linuxPackage = !development && process.platform === 'linux'
++  const node = linuxPackage
++    ? join(process.resourcesPath, 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin', 'node')
++    : process.execPath
+   const nodeBin = development ? join(app.getAppPath(), 'scripts', 'node-bin') : join(process.resourcesPath, 'runtime', 'bin')
+   const pnpm = (development ? process.env.DSH_DESKTOP_PNPM_ENTRY : undefined)
+     ?? (development ? join(app.getAppPath(), 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
+       : join(process.resourcesPath, 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs'))
+   const dsh = (development ? process.env.DSH_DESKTOP_DSH_DIR : undefined)
+-    ?? (development ? join(app.getAppPath(), '.desktop-build', 'development', 'project') : join(app.getAppPath(), 'dsh'))
++    ?? (development ? join(app.getAppPath(), '.desktop-build', 'development', 'project') : join(linuxPackage ? process.resourcesPath : app.getAppPath(), 'dsh'))
+   return { node, nodeBin, pnpm, dsh }
+ }
+ 
+diff --git a/apps/desktop/tests/fixtures/pnpm-smoke.mjs b/apps/desktop/tests/fixtures/pnpm-smoke.mjs
+index 5d16769a..e6ef261d 100644
+--- a/apps/desktop/tests/fixtures/pnpm-smoke.mjs
++++ b/apps/desktop/tests/fixtures/pnpm-smoke.mjs
+@@ -13,7 +13,12 @@ import { delimiter, join } from 'node:path'
+  * @returns {Promise<void>} Resolves after execution and removal of the private installation.
+  */
+ export async function checkPnpm(resourcesRuntime) {
+-  assert.ok(process.versions.electron, 'Run the package-manager smoke with Electron Node mode')
++  if (process.platform === 'linux') {
++    assert.equal(process.execPath, join(resourcesRuntime, 'primary-runtime', 'dependencies', 'node', 'bin', 'node'))
++    assert.equal(process.versions.electron, undefined)
++  } else {
++    assert.ok(process.versions.electron, 'Run the package-manager smoke with Electron Node mode')
++  }
+   assert.equal(existsSync(join(resourcesRuntime, 'pnpm')), false, 'Desktop must ship only primary-runtime pnpm')
+   const primary = join(resourcesRuntime, 'primary-runtime')
+   const pnpm = join(primary, 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+@@ -36,7 +41,7 @@ export async function checkPnpm(resourcesRuntime) {
+ const assert = require('node:assert/strict')
+ assert.equal(require('desktop-pnpm-smoke-dependency').answer, 42)
+ assert.equal(process.execPath, ${JSON.stringify(process.execPath)})
+-assert.ok(process.versions.electron)
++assert.equal(process.versions.electron, ${JSON.stringify(process.versions.electron)})
+ assert.ok(process.execArgv.includes('--expose-internals'))
+ assert.equal(typeof require('internal/modules/esm/loader').getOrInitializeCascadedLoader, 'function')
+ console.log('desktop-node-script-ok')
+diff --git a/apps/desktop/cli/dsh-linux b/apps/desktop/cli/dsh-linux
+new file mode 100644
+index 00000000..3bf6ae50
+--- /dev/null
++++ b/apps/desktop/cli/dsh-linux
+@@ -0,0 +1,14 @@
++#!/bin/sh
++# Run the installed CLI without changing the invoking shell or working directory.
++set -e
++launcher=$0
++while [ -L "$launcher" ]; do
++  directory=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd -P)
++  target=$(readlink "$launcher")
++  case "$target" in
++    /*) launcher=$target ;;
++    *) launcher=$directory/$target ;;
++  esac
++done
++resources=$(CDPATH= cd -- "$(dirname -- "$launcher")/../../.." && pwd -P)
++exec "$resources/runtime/primary-runtime/dependencies/node/bin/node" --expose-internals "$resources/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" "$@"
