@@ -15,6 +15,10 @@ on:
         description: 已发布且资产齐全时仍重新构建，产物保留在 Actions
         type: boolean
         default: false
+      overwrite:
+        description: 重新构建并覆盖已公开 Release 的全部资产（隐含发布）
+        type: boolean
+        default: false
   schedule:
     # 00:00 Beijing time (16:00 UTC on the previous calendar day).
     - cron: "0 16 * * *"
@@ -46,6 +50,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.upstream_tag }}
           REBUILD: ${{ inputs.rebuild }}
+          OVERWRITE: ${{ inputs.overwrite }}
         run: scripts/resolve-release.sh
 
   build:
@@ -101,7 +106,7 @@ jobs:
   publish:
     name: Publish verified packages
     needs: [resolve, build]
-    if: github.event_name == 'schedule' || inputs.publish
+    if: github.event_name == 'schedule' || inputs.publish || inputs.overwrite
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -119,4 +124,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           RELEASE_PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+          OVERWRITE: ${{ inputs.overwrite }}
         run: scripts/publish-release.sh dist

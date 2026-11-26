@@ -16,7 +16,7 @@ AppImage 无法使用 FUSE 时，可以运行 `./文件名.AppImage --appimage-e
 
 ## 自动构建与发布
 
-[构建工作流](https://github.com/LeiSteins/dsh-linux-build/actions/workflows/build-linux.yml) 每天北京时间 00:00 检查上游最新的非草稿 Release。对应版本已有三种安装包以及 `SHA256SUMS` 和 `BUILD-INFO.txt` 时，定时任务跳过构建。手动运行可指定 `upstream_tag`，也可以取消 `publish`，只保留 Actions 产物。已发布且资产齐全的版本默认跳过构建；勾选 `rebuild` 可强制重新构建，新文件保留在 Actions 供维护者验证。如果已公开的版本缺少部分资产，发布作业会补传缺失文件并重新校验。工作流产物保留 30 天。
+[构建工作流](https://github.com/LeiSteins/dsh-linux-build/actions/workflows/build-linux.yml) 每天北京时间 00:00 检查上游最新的非草稿 Release。对应版本已有三种安装包以及 `SHA256SUMS` 和 `BUILD-INFO.txt` 时，定时任务跳过构建。手动运行可指定 `upstream_tag`，也可以取消 `publish`，只保留 Actions 产物。已发布且资产齐全的版本默认跳过构建；勾选 `rebuild` 可强制重新构建，新文件保留在 Actions 供维护者验证；勾选 `overwrite` 会重新构建并覆盖已公开版本的全部资产（隐含发布）。如果已公开的版本缺少部分资产，发布作业会补传缺失文件并重新校验。工作流产物保留 30 天。
 
 构建按上游标签对应的提交检出源码，使用其锁定的 Node.js、pnpm 和依赖。Linux 补丁让桌面 Host 和 CLI 使用应用自带的 Node.js，以避免 Electron 的 Node 模式与 `sharp` 在 Linux 下发生 GLib 冲突。工作流验证打包后的 Host、图片解码、PTY、离线插件安装与 Office 转换，再从同一份桌面构建生成三个格式。发布作业核对 GitHub 收到的文件大小和 SHA-256，校验齐全后公开 Release。
 

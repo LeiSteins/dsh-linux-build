@@ -6,6 +6,8 @@ tag=${RELEASE_TAG:?}
 version=$(version_from_tag "$tag")
 prerelease=${RELEASE_PRERELEASE:?}
 [[ "$prerelease" == true || "$prerelease" == false ]]
+overwrite=${OVERWRITE:-false}
+[[ "$overwrite" == true || "$overwrite" == false ]] || { echo "无效的 overwrite 输入: $overwrite" >&2; exit 1; }
 repo=${GITHUB_REPOSITORY:?}
 revision=${GITHUB_SHA:?}
 cd -- "${1:?请输入工作流产物目录}"
@@ -33,15 +35,23 @@ NOTES
 existing=$(find_release "$repo" "$tag")
 expected_assets=$(printf '%s\n' "${assets[@]}" | jq -Rn '[inputs]')
 if [[ $(jq -r '.draft' <<< "$existing") == false ]]; then
-  missing=$(missing_asset_names "$existing" "$expected_assets")
-  if [[ -z "$missing" ]]; then
-    echo "$tag 已发布。新构建保留在 Actions Artifacts。"
-    exit 0
+  if [[ "$overwrite" == true ]]; then
+    # Hide the release while replacing large assets so no mix of old and new files is served.
+    echo "$tag 已公开，切换为草稿后覆盖全部资产。"
+    gh release edit "$tag" --repo "$repo" --draft
+    gh release upload "$tag" "${assets[@]}" --repo "$repo" --clobber
+    release_id=$(jq -er '.id' <<< "$existing")
+  else
+    missing=$(missing_asset_names "$existing" "$expected_assets")
+    if [[ -z "$missing" ]]; then
+      echo "$tag 已发布。新构建保留在 Actions Artifacts。"
+      exit 0
+    fi
+    mapfile -t missing_files <<< "$missing"
+    echo "$tag 已公开但缺少资产，尝试补传：${missing_files[*]}"
+    gh release upload "$tag" "${missing_files[@]}" --repo "$repo" --clobber
+    release_id=$(jq -er '.id' <<< "$existing")
   fi
-  mapfile -t missing_files <<< "$missing"
-  echo "$tag 已公开但缺少资产，尝试补传：${missing_files[*]}"
-  gh release upload "$tag" "${missing_files[@]}" --repo "$repo" --clobber
-  release_id=$(jq -er '.id' <<< "$existing")
 else
   if [[ "$existing" == '{}' ]]; then
     gh release create "$tag" --repo "$repo" --target "$revision" --draft \
