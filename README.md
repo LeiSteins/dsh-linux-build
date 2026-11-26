@@ -1,10 +1,10 @@
 # DSH Linux 社区构建
 
-本项目从 [DeepSeek Harness 上游源码](https://github.com/deepseek-ai/deepseek-harness) 构建 Linux x86_64 桌面安装包，由社区独立维护。安装包自带应用所需的 Node.js、pnpm 和 Python 运行时。
+本项目从 [DeepSeek Harness 上游源码](https://github.com/deepseek-ai/deepseek-harness) 构建 Linux x86_64 桌面安装包，由社区独立维护。安装包自带应用所需的 Node.js、pnpm 和 Python 运行时。桌面应用名为 **Deepseek Harness**，使用上游 Windows 桌面图标。
 
 ## 下载与安装
 
-在 [GitHub Releases](https://github.com/LeiSteins/dsh-linux-build/releases) 选择版本，展开 **Assets** 下载对应文件。上游预发布版本会保留 **Pre-release** 标记。
+在 [GitHub Releases](https://github.com/LeiSteins/dsh-linux-build/releases) 选择版本，展开 **Assets** 下载对应文件。上游预发布版本会保留 **Pre-release** 标记。应用内版本和安装包文件名沿用上游版本。DEB 和 RPM 的包管理器元数据使用 `~` 表示预发布，例如 `0.2.3~alpha.2`，保证预发布版本排在正式版之前。
 
 | 环境 | 文件 | 安装或运行 |
 | --- | --- | --- |

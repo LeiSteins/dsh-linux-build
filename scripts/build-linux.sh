@@ -37,6 +37,8 @@ if [[ -n ${UPSTREAM_REVISION:-} && "$revision" != "$UPSTREAM_REVISION" ]]; then
   exit 1
 fi
 
+export DSH_CLIENT_TITLE='Deepseek Harness'
+export DSH_DESKTOP_BUILD_VERSION="$version"
 export DSH_DESKTOP_APP_ID=io.github.leisteins.dshlinux
 export DSH_DESKTOP_TARGET_PLATFORM=linux DSH_DESKTOP_TARGET_ARCH=x64 DSH_DESKTOP_UNSIGNED=1
 export DSH_DESKTOP_BUILD_COMMIT="$revision" DSH_DESKTOP_BUILD_DIRTY=1 DSH_TELEMETRY_DISABLED=1
@@ -69,6 +71,12 @@ pnpm --dir apps/desktop run prepare:dsh 2>&1 | sed -uE 's/([?&]token=)[^[:space:
 
 builder=(pnpm --dir apps/desktop exec electron-builder --config electron-builder-linux.config.mjs --x64 --publish never "--config.directories.output=$stage")
 "${builder[@]}" --linux --dir
+cmp apps/desktop/resources/icon-windows.png "$stage/linux-unpacked/resources/icon.png"
+ELECTRON_RUN_AS_NODE=1 "$stage/linux-unpacked/dsh-linux" -e '
+  const [archive, version] = process.argv.slice(1);
+  const { version: packagedVersion } = JSON.parse(require("node:fs").readFileSync(archive + "/package.json", "utf8"));
+  require("node:assert/strict").equal(packagedVersion, version);
+' "$stage/linux-unpacked/resources/app.asar" "$version"
 pnpm exec tsx apps/desktop/scripts/smoke-linux.mts "$stage/linux-unpacked/resources" 2>&1 |
   sed -uE 's/([?&]token=)[^[:space:]&]+/\1[redacted]/g'
 "${builder[@]}" --linux deb rpm AppImage --prepackaged "$stage/linux-unpacked"
@@ -77,14 +85,17 @@ mapfile -t packages < <(package_names "$version")
 for file in "${packages[@]}"; do
   test -s "$stage/$file"
 done
+native_version=${version//-/\~}
 [[ $(dpkg-deb -f "$stage/${packages[0]}" Architecture) == amd64 ]]
+[[ $(dpkg-deb -f "$stage/${packages[0]}" Version) == "$native_version" ]]
 mkdir "$stage/rpmdb"
-[[ $(rpm --dbpath "$stage/rpmdb" -qp --queryformat '%{ARCH}' "$stage/${packages[1]}") == x86_64 ]]
+[[ $(rpm --dbpath "$stage/rpmdb" -qp --queryformat '%{ARCH} %{VERSION}' "$stage/${packages[1]}") == "x86_64 $native_version" ]]
 mkdir "$stage/appimage-test"
 (
   cd "$stage/appimage-test"
   "$stage/${packages[2]}" --appimage-extract dsh-linux.desktop >/dev/null
-  test -s squashfs-root/dsh-linux.desktop
+  grep -Fx "Name=$DSH_CLIENT_TITLE" squashfs-root/dsh-linux.desktop
+  grep -Fx 'Icon=dsh-linux' squashfs-root/dsh-linux.desktop
 )
 
 mkdir -p -- "$output"
@@ -95,6 +106,7 @@ cd -- "$output"
 sha256sum -- "${packages[@]}" > SHA256SUMS
 {
   printf 'Upstream repository: https://github.com/%s\n' "$UPSTREAM_REPOSITORY"
+  printf 'Application: %s\nVersion: %s\n' "$DSH_CLIENT_TITLE" "$version"
   printf 'Upstream tag: %s\nUpstream commit: %s\n' "$tag" "$revision"
   printf 'Packaging commit: %s\n' "$(git -C "$repo" rev-parse HEAD)"
   if [[ -n ${GITHUB_RUN_ID:-} ]]; then

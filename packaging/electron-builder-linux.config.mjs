@@ -6,12 +6,14 @@ import { createElectronBuilderConfig } from './scripts/electron-builder-config.m
 const config = createElectronBuilderConfig()
 const { dsh } = desktopTargetBuildPaths('linux-x64')
 const upstreamRoot = fileURLToPath(new URL('../../', import.meta.url))
+const productName = process.env.DSH_CLIENT_TITLE
+if (!productName) throw new Error('DSH_CLIENT_TITLE is required for Linux packaging')
 const executableName = 'dsh-linux'
 const maintainer = 'DSH Linux (Community) <noreply@github.com>'
 const homepage = 'https://github.com/deepseek-ai/deepseek-harness'
 export default {
   ...config,
-  productName: 'DSH Linux (Community)',
+  productName,
   executableName,
   artifactName: 'dsh-linux-${version}-${arch}.${ext}',
   extraMetadata: { ...config.extraMetadata, homepage, desktopName: `${executableName}.desktop` },
