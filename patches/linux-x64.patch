@@ -86,10 +86,32 @@ index a0698880..d920b323 100644
  
  function manifestVersion(path: string, subject: string): string {
 diff --git a/apps/desktop/scripts/prepare-runtime.ts b/apps/desktop/scripts/prepare-runtime.ts
-index 4e338532..e24fcc89 100644
+index 4e338532..b8e8c858 100644
 --- a/apps/desktop/scripts/prepare-runtime.ts
 +++ b/apps/desktop/scripts/prepare-runtime.ts
-@@ -27,7 +27,7 @@ async function prepareElectron({ platform, arch }: DesktopTarget): Promise<strin
+@@ -7,6 +7,7 @@ import { join } from 'node:path'
+ import { parseArgs } from 'node:util'
+ import { downloadArtifact } from '@electron/get'
+ import extractZip from 'extract-zip'
++import { lt } from 'semver'
+ import { readPrimaryRuntime } from '../../../packages/skill/tool-workspace-dependencies/src/index.ts'
+ import { desktopTargetPlatform, resolveDesktopBuildTarget, resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
+ import { packagingStep } from './packaging-step.mjs'
+@@ -17,17 +18,19 @@ import { prepareCommandLink } from './prepare-command-link.ts'
+ const BUILD_PATHS = resolveDesktopTargetBuildPaths()
+ const RUNTIME_ROOT = BUILD_PATHS.runtime
+ 
+-type DesktopTarget = ReturnType<typeof desktopTargetPlatform>
++type DesktopTarget = ReturnType<typeof desktopTargetPlatform> | { platform: 'linux'; arch: 'x64' }
+ 
+ /** Extract the target Electron distribution and return its embedded Node version. */
+ async function prepareElectron({ platform, arch }: DesktopTarget): Promise<string> {
+   const require = createRequire(import.meta.url)
+-  const { version } = require('electron/package.json') as { version: string }
++  const { version: upstreamVersion } = require('electron/package.json') as { version: string }
++  // Chromium 156 forwards the Wayland activation token from the system tray.
++  const version = platform === 'linux' && lt(upstreamVersion, '45.5.0') ? '45.5.0' : upstreamVersion
+   const archive = await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'download:electron',
      () => downloadArtifact({ version, platform, arch, artifactName: 'electron', cacheRoot: BUILD_PATHS.downloads }))
    rmSync(BUILD_PATHS.electron, { recursive: true, force: true })
    await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'extract:electron', () => extractZip(archive, { dir: BUILD_PATHS.electron }))
@@ -98,7 +120,16 @@ index 4e338532..e24fcc89 100644
    return execFileSync(executable, ['-p', 'process.versions.node'], {
      encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
    }).trim()
-@@ -65,7 +65,11 @@ async function main(): Promise<void> {
+@@ -50,7 +53,7 @@ function prepareCli({ platform, arch }: DesktopTarget): void {
+ 
+ async function main(): Promise<void> {
+   const { values } = parseArgs({ options: { 'defer-primary-runtime-smoke': { type: 'boolean', default: false } } })
+-  const target = desktopTargetPlatform(resolveDesktopBuildTarget())
++  const target = desktopTargetPlatform(resolveDesktopBuildTarget()) as DesktopTarget
+   rmSync(RUNTIME_ROOT, { recursive: true, force: true })
+   mkdirSync(RUNTIME_ROOT, { recursive: true })
+   const preparePrimary = () => packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:primary-runtime',
+@@ -65,7 +68,11 @@ async function main(): Promise<void> {
      nodeVersion = await prepareElectron(target)
      await preparePrimary()
    }
@@ -642,10 +673,10 @@ index 61fda9e3..d5457a11 100644
    const disposeHandlers = (): void => {
 diff --git a/apps/desktop/tests/caption-controls.client.spec.ts b/apps/desktop/tests/caption-controls.client.spec.ts
 new file mode 100644
-index 00000000..7a855f21
+index 00000000..1772edc4
 --- /dev/null
 +++ b/apps/desktop/tests/caption-controls.client.spec.ts
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,41 @@
 +// @vitest-environment jsdom
 +import { afterEach, expect, it, vi } from 'vitest'
 +import { DESKTOP_IPC } from '../src/ipc.ts'
@@ -663,7 +694,8 @@ index 00000000..7a855f21
 +
 +it('mounts before the document root exists', () => {
 +  vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
-+  vi.spyOn(document, 'documentElement', 'get').mockReturnValue(null)
++  const earlyDocument: { readonly documentElement: HTMLElement | null } = document
++  vi.spyOn(earlyDocument, 'documentElement', 'get').mockReturnValue(null)
 +  expect(() => installLinuxCaptionControls()).not.toThrow()
 +  expect(document.querySelector('[data-linux-caption-controls]')).not.toBeNull()
 +})
