@@ -125,7 +125,7 @@ index 6a63dc72..55e9674c 100644
        void api.takeNotice().then((notice) => {
          if (mounted.current && notice === 'session-expired') setExpiryNotice(true)
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 291ed084..27a26164 100644
+index 291ed084..a68f253a 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -72,6 +72,8 @@ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
@@ -183,6 +183,47 @@ index 291ed084..27a26164 100644
      applicationVersion: app.getVersion(),
      // The release has no separate build number; omit Electron's bundle version.
      version: '',
+@@ -1249,8 +1256,9 @@ async function main(): Promise<void> {
+     tray?.relabel()
+   }
+   refreshApplicationMenu()
+-  const trayIconPath = development ? join(app.getAppPath(), 'resources', 'tray-windows.ico') : join(process.resourcesPath, 'tray.ico')
+-  if (process.platform === 'win32') {
++  const trayIconPath = process.platform === 'linux' ? applicationIconPath
++    : development ? join(app.getAppPath(), 'resources', 'tray-windows.ico') : join(process.resourcesPath, 'tray.ico')
++  if (process.platform === 'win32' || process.platform === 'linux') {
+     // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
+     try {
+       tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
+diff --git a/apps/desktop/src/tray.ts b/apps/desktop/src/tray.ts
+index b2ce416b..63d8cc56 100644
+--- a/apps/desktop/src/tray.ts
++++ b/apps/desktop/src/tray.ts
+@@ -1,11 +1,11 @@
+-/** Windows system tray: the always-present way back to a hidden window and the explicit quit entry. */
++/** Windows and Linux system tray for reopening the window and requesting quit. */
+ 
+ import { Menu, nativeImage, Tray } from 'electron'
+ import type { DesktopLocale } from './locale.ts'
+ 
+ /** Main-process actions the tray triggers; both run the same paths as the window and application menu. */
+ export interface DesktopTrayOptions {
+-  /** Multi-size ICO rendered by `scripts/render-tray-icon.ts`; Windows picks the bitmap for the display scale. */
++  /** Windows multi-size tray ICO or Linux application PNG. */
+   readonly iconPath: string
+   readonly locale: () => DesktopLocale
+   /** Show and focus the primary window. */
+@@ -20,7 +20,9 @@ export class DesktopTray {
+ 
+   /** @param options - Icon path, locale reader, and the open and quit actions. */
+   constructor(private readonly options: DesktopTrayOptions) {
+-    const tray = new Tray(nativeImage.createFromPath(options.iconPath))
++    const icon = nativeImage.createFromPath(options.iconPath)
++    // Keep the Linux status notifier pixmap small while retaining enough detail for HiDPI panels.
++    const tray = new Tray(process.platform === 'linux' ? icon.resize({ width: 64 }) : icon)
+     this.tray = tray
+     tray.on('click', () => { options.open() })
+     this.relabel()
 diff --git a/apps/desktop/src/welcome-window.ts b/apps/desktop/src/welcome-window.ts
 index 61fda9e3..d5457a11 100644
 --- a/apps/desktop/src/welcome-window.ts
@@ -225,6 +266,67 @@ index 5d16769a..e6ef261d 100644
  assert.ok(process.execArgv.includes('--expose-internals'))
  assert.equal(typeof require('internal/modules/esm/loader').getOrInitializeCascadedLoader, 'function')
  console.log('desktop-node-script-ok')
+diff --git a/apps/desktop/tests/tray.spec.ts b/apps/desktop/tests/tray.spec.ts
+index 11c3a488..7afd8dbd 100644
+--- a/apps/desktop/tests/tray.spec.ts
++++ b/apps/desktop/tests/tray.spec.ts
+@@ -13,9 +13,10 @@ const native = await vi.hoisted(async () => {
+     constructor(readonly image: unknown) { super(); trays.push(this) }
+   }
+   const menus: MenuItemConstructorOptions[][] = []
++  const resize = vi.fn(({ width }: { width: number }) => ({ width }))
+   return {
+-    trays, FakeTray, menus,
+-    createFromPath: vi.fn((path: string) => ({ path })),
++    trays, FakeTray, menus, resize,
++    createFromPath: vi.fn((path: string) => ({ path, resize })),
+     buildFromTemplate: vi.fn((template: MenuItemConstructorOptions[]) => { menus.push(template); return { template } }),
+   }
+ })
+@@ -25,13 +26,13 @@ vi.mock('electron', () => ({
+   Menu: { buildFromTemplate: native.buildFromTemplate },
+ }))
+ 
+-afterEach(() => { native.trays.length = 0; native.menus.length = 0; vi.clearAllMocks() })
++afterEach(() => { native.trays.length = 0; native.menus.length = 0; vi.clearAllMocks(); vi.unstubAllGlobals() })
+ 
+-function setup(locale = 'en') {
+-  let current = resolveDesktopLocale(locale)
++function setup(iconPath = 'C:/app/resources/tray.ico') {
++  let current = resolveDesktopLocale('en')
+   const open = vi.fn()
+   const quit = vi.fn()
+-  const tray = new DesktopTray({ iconPath: 'C:/app/resources/tray.ico', locale: () => current, open, quit })
++  const tray = new DesktopTray({ iconPath, locale: () => current, open, quit })
+   return { tray, open, quit, native: native.trays[0]!, setLocale: (next: string) => { current = resolveDesktopLocale(next) } }
+ }
+ 
+@@ -40,14 +41,24 @@ function labels(menu: MenuItemConstructorOptions[]): (string | undefined)[] {
+ }
+ 
+ it('shows the application icon with its name as the tooltip and an Open / Quit menu', () => {
++  vi.stubGlobal('process', { ...process, platform: 'win32' })
+   const f = setup()
+   expect(native.createFromPath).toHaveBeenCalledWith('C:/app/resources/tray.ico')
+-  expect(f.native.image).toEqual({ path: 'C:/app/resources/tray.ico' })
++  expect(f.native.image).toEqual({ path: 'C:/app/resources/tray.ico', resize: native.resize })
++  expect(native.resize).not.toHaveBeenCalled()
+   expect(f.native.setToolTip).toHaveBeenCalledWith('DeepSeek Harness')
+   expect(labels(native.menus[0]!)).toEqual(['Open DeepSeek Harness', 'separator', 'Quit DeepSeek Harness'])
+   expect(f.native.setContextMenu).toHaveBeenCalledWith({ template: native.menus[0] })
+ })
+ 
++it('resizes the Linux application PNG for the status notifier', () => {
++  vi.stubGlobal('process', { ...process, platform: 'linux' })
++  const f = setup('/opt/dsh-linux/resources/icon.png')
++  expect(native.createFromPath).toHaveBeenCalledWith('/opt/dsh-linux/resources/icon.png')
++  expect(native.resize).toHaveBeenCalledExactlyOnceWith({ width: 64 })
++  expect(f.native.image).toEqual({ width: 64 })
++})
++
+ it('opens the window on a single click and routes menu entries to the open and quit actions', () => {
+   const f = setup()
+   f.native.emit('click')
 diff --git a/apps/desktop/tsdown.config.ts b/apps/desktop/tsdown.config.ts
 index ddf9c2d6..63287dbf 100644
 --- a/apps/desktop/tsdown.config.ts
