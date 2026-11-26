@@ -26,10 +26,16 @@ find_release() {
     jq -c --arg tag "$2" '[.[][] | select(.tag_name == $tag)][0] // {}'
 }
 
-release_has_assets() {
+missing_asset_names() {
   local release=$1 names=$2
-  jq -e --argjson assets "$names" '
+  jq -r --argjson assets "$names" '
     .assets as $uploaded |
-    all($assets[]; . as $name | any($uploaded[]; .name == $name and .state == "uploaded" and .size > 0))
-  ' <<< "$release" >/dev/null
+    $assets[] as $name |
+    select(any($uploaded[]; .name == $name and .state == "uploaded" and .size > 0) | not) |
+    $name
+  ' <<< "$release"
+}
+
+release_has_assets() {
+  [[ -z $(missing_asset_names "$1" "$2") ]]
 }

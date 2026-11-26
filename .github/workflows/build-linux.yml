@@ -11,6 +11,10 @@ on:
         description: 发布到 GitHub Releases
         type: boolean
         default: true
+      rebuild:
+        description: 已发布且资产齐全时仍重新构建，产物保留在 Actions
+        type: boolean
+        default: false
   schedule:
     # 00:00 Beijing time (16:00 UTC on the previous calendar day).
     - cron: "0 16 * * *"
@@ -41,6 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.upstream_tag }}
+          REBUILD: ${{ inputs.rebuild }}
         run: scripts/resolve-release.sh
 
   build:

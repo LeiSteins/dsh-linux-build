@@ -31,32 +31,35 @@ NOTES
 )
 
 existing=$(find_release "$repo" "$tag")
+expected_assets=$(printf '%s\n' "${assets[@]}" | jq -Rn '[inputs]')
 if [[ $(jq -r '.draft' <<< "$existing") == false ]]; then
-  expected_assets=$(printf '%s\n' "${assets[@]}" | jq -Rn '[inputs]')
-  if release_has_assets "$existing" "$expected_assets"; then
+  missing=$(missing_asset_names "$existing" "$expected_assets")
+  if [[ -z "$missing" ]]; then
     echo "$tag 已发布。新构建保留在 Actions Artifacts。"
     exit 0
   fi
-  echo "$tag 已公开，但产物不完整。请检查 Release 后再处理。" >&2
-  exit 1
+  mapfile -t missing_files <<< "$missing"
+  echo "$tag 已公开但缺少资产，尝试补传：${missing_files[*]}"
+  gh release upload "$tag" "${missing_files[@]}" --repo "$repo" --clobber
+  release_id=$(jq -er '.id' <<< "$existing")
+else
+  if [[ "$existing" == '{}' ]]; then
+    gh release create "$tag" --repo "$repo" --target "$revision" --draft \
+      --prerelease="$prerelease" --title "$title" --notes "$notes"
+    # The releases list can briefly omit a draft immediately after creation.
+    for delay in 1 2 4 8 16; do
+      if existing=$(find_release "$repo" "$tag") && jq -e '.draft == true' <<< "$existing" >/dev/null; then
+        break
+      fi
+      sleep "$delay"
+    done
+  fi
+  if ! release_id=$(jq -er 'select(.draft == true) | .id' <<< "$existing"); then
+    echo "无法读取 $tag 的 Release 草稿。重新运行发布作业可继续使用已有构建产物。" >&2
+    exit 1
+  fi
+  gh release upload "$tag" "${assets[@]}" --repo "$repo" --clobber
 fi
-
-if [[ "$existing" == '{}' ]]; then
-  gh release create "$tag" --repo "$repo" --target "$revision" --draft \
-    --prerelease="$prerelease" --title "$title" --notes "$notes"
-  # The releases list can briefly omit a draft immediately after creation.
-  for delay in 1 2 4 8 16; do
-    if existing=$(find_release "$repo" "$tag") && jq -e '.draft == true' <<< "$existing" >/dev/null; then
-      break
-    fi
-    sleep "$delay"
-  done
-fi
-if ! release_id=$(jq -er 'select(.draft == true) | .id' <<< "$existing"); then
-  echo "无法读取 $tag 的 Release 草稿。重新运行发布作业可继续使用已有构建产物。" >&2
-  exit 1
-fi
-gh release upload "$tag" "${assets[@]}" --repo "$repo" --clobber
 
 uploaded=$(gh api "repos/$repo/releases/$release_id/assets?per_page=100")
 for file in "${assets[@]}"; do
