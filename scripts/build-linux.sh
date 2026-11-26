@@ -58,7 +58,8 @@ pnpm install --frozen-lockfile
 pnpm run build:artifacts --profile local
 
 # Follow upstream package-target.ts to prepare the local package closure and embedded runtimes.
-packed="$upstream/apps/desktop/.desktop-build/targets/linux-x64/packed"
+target_build="$upstream/apps/desktop/.desktop-build/targets/linux-x64"
+packed="$target_build/packed"
 mkdir -p "$packed/dsh" "$packed/vendor" "$packed/landlock"
 pnpm exec tsx apps/desktop/scripts/pack-local-packages.ts --out "$packed/dsh" --concurrency 4
 pnpm --dir apps/desktop-host pack --pack-destination "$packed/dsh"
@@ -68,6 +69,19 @@ pnpm --dir native/system/packages/entry pack --pack-destination "$packed/landloc
 pnpm --dir apps/desktop run prepare:runtime
 pnpm --dir apps/desktop run prepare:packages
 pnpm --dir apps/desktop run prepare:dsh 2>&1 | sed -uE 's/([?&]token=)[^[:space:]&]+/\1[redacted]/g'
+
+# hicolor indexes standard sizes through 512 px. The upstream icon is 1024 px.
+pnpm --dir apps/desktop exec node --input-type=module - "$target_build/linux-icons" <<'JS'
+import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import sharp from 'sharp'
+
+const directory = process.argv[2]
+await mkdir(directory, { recursive: true })
+for (const size of [16, 32, 48, 64, 128, 256, 512]) {
+  await sharp('resources/icon-windows.png').resize(size, size).toFile(join(directory, `${size}x${size}.png`))
+}
+JS
 
 builder=(pnpm --dir apps/desktop exec electron-builder --config electron-builder-linux.config.mjs --x64 --publish never "--config.directories.output=$stage")
 "${builder[@]}" --linux --dir
@@ -90,12 +104,17 @@ native_version=${version//-/\~}
 [[ $(dpkg-deb -f "$stage/${packages[0]}" Version) == "$native_version" ]]
 mkdir "$stage/rpmdb"
 [[ $(rpm --dbpath "$stage/rpmdb" -qp --queryformat '%{ARCH} %{VERSION}' "$stage/${packages[1]}") == "x86_64 $native_version" ]]
+launcher_icon=/usr/share/icons/hicolor/256x256/apps/dsh-linux.png
+dpkg-deb --fsys-tarfile "$stage/${packages[0]}" | tar -t | grep -Fx ".$launcher_icon"
+rpm --dbpath "$stage/rpmdb" -qpl "$stage/${packages[1]}" | grep -Fx "$launcher_icon"
 mkdir "$stage/appimage-test"
 (
   cd "$stage/appimage-test"
   "$stage/${packages[2]}" --appimage-extract dsh-linux.desktop >/dev/null
   grep -Fx "Name=$DSH_CLIENT_TITLE" squashfs-root/dsh-linux.desktop
   grep -Fx 'Icon=dsh-linux' squashfs-root/dsh-linux.desktop
+  "$stage/${packages[2]}" --appimage-extract "${launcher_icon#/}" >/dev/null
+  test -s "squashfs-root$launcher_icon"
 )
 
 mkdir -p -- "$output"

@@ -5,7 +5,7 @@ import { desktopTargetBuildPaths } from './scripts/desktop-build-paths.mjs'
 import { createElectronBuilderConfig } from './scripts/electron-builder-config.mjs'
 
 const config = createElectronBuilderConfig()
-const { dsh, electron } = desktopTargetBuildPaths('linux-x64')
+const { root, dsh, electron } = desktopTargetBuildPaths('linux-x64')
 const upstreamRoot = fileURLToPath(new URL('../../', import.meta.url))
 const productName = process.env.DSH_CLIENT_TITLE
 if (!productName) throw new Error('DSH_CLIENT_TITLE is required for Linux packaging')
@@ -19,7 +19,7 @@ export default {
   executableName,
   artifactName: 'dsh-linux-${version}-${arch}.${ext}',
   extraMetadata: { ...config.extraMetadata, homepage, desktopName: `${executableName}.desktop` },
-  linux: { ...config.linux, icon: 'resources/icon-windows.png', maintainer, syncDesktopName: true },
+  linux: { ...config.linux, icon: join(root, 'linux-icons'), maintainer, syncDesktopName: true },
   toolsets: { appimage: '1.0.3' },
   files: config.files.filter(entry => typeof entry === 'string'),
   extraResources: [
