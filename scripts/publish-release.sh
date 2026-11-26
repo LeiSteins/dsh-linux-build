@@ -44,9 +44,18 @@ fi
 if [[ "$existing" == '{}' ]]; then
   gh release create "$tag" --repo "$repo" --target "$revision" --draft \
     --prerelease="$prerelease" --title "$title" --notes "$notes"
-  existing=$(find_release "$repo" "$tag")
+  # The releases list can briefly omit a draft immediately after creation.
+  for delay in 1 2 4 8 16; do
+    if existing=$(find_release "$repo" "$tag") && jq -e '.draft == true' <<< "$existing" >/dev/null; then
+      break
+    fi
+    sleep "$delay"
+  done
 fi
-release_id=$(jq -er 'select(.draft == true) | .id' <<< "$existing")
+if ! release_id=$(jq -er 'select(.draft == true) | .id' <<< "$existing"); then
+  echo "无法读取 $tag 的 Release 草稿。重新运行发布作业可继续使用已有构建产物。" >&2
+  exit 1
+fi
 gh release upload "$tag" "${assets[@]}" --repo "$repo" --clobber
 
 uploaded=$(gh api "repos/$repo/releases/$release_id/assets?per_page=100")
