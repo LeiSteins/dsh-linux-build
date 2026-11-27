@@ -38,8 +38,8 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
       revision: ${{ steps.release.outputs.revision }}
-      prerelease: ${{ steps.release.outputs.prerelease }}
       should_build: ${{ steps.release.outputs.should_build }}
+      promote_existing: ${{ steps.release.outputs.promote_existing }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -106,7 +106,11 @@ jobs:
   publish:
     name: Publish verified packages
     needs: [resolve, build]
-    if: github.event_name == 'schedule' || inputs.publish || inputs.overwrite
+    if: >-
+      ${{ !cancelled() && needs.resolve.result == 'success'
+          && (github.event_name == 'schedule' || inputs.publish || inputs.overwrite)
+          && (needs.build.result == 'success'
+              || (needs.build.result == 'skipped' && needs.resolve.outputs.promote_existing == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -116,14 +120,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        if: needs.build.result == 'success'
         with:
           name: dsh-linux-${{ needs.resolve.outputs.version }}-x86_64
           path: dist
-      - name: Upload to a draft, verify assets and publish
+      - name: Publish or promote the release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
-          RELEASE_PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
           UPSTREAM_REVISION: ${{ needs.resolve.outputs.revision }}
           OVERWRITE: ${{ inputs.overwrite }}
-        run: scripts/publish-release.sh dist
+          ARTIFACT_DIR: ${{ needs.build.result == 'success' && 'dist' || '' }}
+        run: scripts/publish-release.sh "$ARTIFACT_DIR"

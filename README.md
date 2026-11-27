@@ -4,7 +4,7 @@ DeepSeek Harness 的 Linux x86_64 桌面安装包，由社区维护。
 
 ## 下载与安装
 
-打开发布页，选择所需版本，在 **Assets** 中下载对应的安装包。测试版标有 **Pre-release**。 [GitHub Releases](https://github.com/LeiSteins/dsh-linux-build/releases)
+打开发布页，选择所需版本，在 **Assets** 中下载对应的安装包。本项目统一发布正式 Release，版本号里的 `alpha`、`beta`、`rc` 仍表示上游的预发布阶段。 [GitHub Releases](https://github.com/LeiSteins/dsh-linux-build/releases)
 
 | 环境 | 文件 | 安装或运行 |
 | --- | --- | --- |

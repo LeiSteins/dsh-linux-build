@@ -521,7 +521,7 @@ index 00000000..2334dcac
 +    .mockResolvedValueOnce(Response.json([release('0.2.3-alpha.9'), release('1.0.0', true), incomplete], {
 +      headers: { Link: '<https://unexpected.example/page>; rel="next"' },
 +    }))
-+    .mockResolvedValueOnce(Response.json([release('0.2.3-alpha.10'), release('0.2.2-rc.6')]))
++    .mockResolvedValueOnce(Response.json([{ ...release('0.2.3-alpha.10'), prerelease: false }, release('0.2.2-rc.6')]))
 +  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', type, request, signal)).resolves.toEqual({
 +    kind: 'available',
 +    version: '0.2.3-alpha.10',
