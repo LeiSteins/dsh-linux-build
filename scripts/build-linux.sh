@@ -57,6 +57,7 @@ patches=(
   0004-linux-branding.patch
   0005-linux-release-update.patch
   0006-linux-welcome-window.patch
+  0007-linux-host-environment.patch
 )
 for patch in "${patches[@]}"; do
   if ! GIT_INDEX_FILE="$patch_index" git apply --cached "$repo/patches/$patch"; then
@@ -80,6 +81,10 @@ pnpm exec vitest run \
   apps/desktop/tests/prepare-package-set.spec.ts \
   apps/desktop/tests/retain-desktop-ci.spec.ts \
   apps/desktop/tests/main-startup.spec.ts \
+  apps/desktop/tests/host-process.spec.ts \
+  apps/desktop/tests/node-environment.spec.ts \
+  apps/desktop/tests/prepared-runtime-smoke.spec.ts \
+  apps/desktop/tests/smoke-runtime.spec.ts \
   apps/desktop/tests/tray.spec.ts \
   apps/desktop/tests/caption-controls.client.spec.ts \
   apps/desktop/tests/preload-menu.client.spec.ts \
