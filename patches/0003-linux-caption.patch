@@ -1,147 +1,3 @@
-diff --git a/apps/desktop/cli/dsh-linux b/apps/desktop/cli/dsh-linux
-new file mode 100644
-index 00000000..3bf6ae50
---- /dev/null
-+++ b/apps/desktop/cli/dsh-linux
-@@ -0,0 +1,14 @@
-+#!/bin/sh
-+# Run the installed CLI without changing the invoking shell or working directory.
-+set -e
-+launcher=$0
-+while [ -L "$launcher" ]; do
-+  directory=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd -P)
-+  target=$(readlink "$launcher")
-+  case "$target" in
-+    /*) launcher=$target ;;
-+    *) launcher=$directory/$target ;;
-+  esac
-+done
-+resources=$(CDPATH= cd -- "$(dirname -- "$launcher")/../../.." && pwd -P)
-+exec "$resources/runtime/primary-runtime/dependencies/node/bin/node" --expose-internals "$resources/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" "$@"
-diff --git a/apps/desktop/scripts/desktop-build-paths.mjs b/apps/desktop/scripts/desktop-build-paths.mjs
-index edfd9cdf..d935606a 100644
---- a/apps/desktop/scripts/desktop-build-paths.mjs
-+++ b/apps/desktop/scripts/desktop-build-paths.mjs
-@@ -4,7 +4,7 @@ import { isAbsolute, join, resolve } from 'node:path'
- 
- const APP_ROOT = resolve(import.meta.dirname, '..')
- const BUILD_ROOT = join(APP_ROOT, '.desktop-build')
--const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
-+const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'])
- 
- /**
-  * Resolve the fixed build target selected by a packaging environment.
-@@ -79,6 +79,7 @@ export function desktopTargetPlatform(target) {
-     'mac-arm64': { platform: 'darwin', arch: 'arm64' },
-     'mac-x64': { platform: 'darwin', arch: 'x64' },
-     'win-x64': { platform: 'win32', arch: 'x64' },
-+    'linux-x64': { platform: 'linux', arch: 'x64' },
-   })
-   return targets[target]
- }
-diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
-index a777a058..48b636c6 100644
---- a/apps/desktop/scripts/electron-builder-config.mjs
-+++ b/apps/desktop/scripts/electron-builder-config.mjs
-@@ -66,7 +66,7 @@ export function createElectronBuilderConfig(
-   if (skipNotarization && (unsigned || resolvedPlatform !== 'darwin')) throw new Error('Skipping notarization requires a signed macOS build')
-   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
-   const packagesWindows = resolvedPlatform === 'win32'
--  const policy = packagesMacOS && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
-+  const policy = (packagesMacOS || resolvedPlatform === 'linux') && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
-   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
-   const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
-   if (packagesMacOS && !unsigned && !skipNotarization) resolveMacOSNotarizationEnvironment(env)
-diff --git a/apps/desktop/scripts/prepare-cli.ts b/apps/desktop/scripts/prepare-cli.ts
-index d2b9e142..5e78ecf5 100644
---- a/apps/desktop/scripts/prepare-cli.ts
-+++ b/apps/desktop/scripts/prepare-cli.ts
-@@ -8,10 +8,10 @@ import { join } from 'node:path'
-  * @param destination - Physical runtime/cli directory prepared for the application.
-  * @param platform - Target Desktop operating system.
-  */
--export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32'): void {
-+export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32' | 'linux'): void {
-   const name = platform === 'win32' ? 'dsh.cmd' : 'dsh'
-   const command = join(destination, 'bin', name)
-   mkdirSync(join(destination, 'bin'), { recursive: true })
--  copyFileSync(join(import.meta.dirname, '..', 'cli', name), command)
--  if (platform === 'darwin') chmodSync(command, 0o755)
-+  copyFileSync(join(import.meta.dirname, '..', 'cli', platform === 'linux' ? 'dsh-linux' : name), command)
-+  if (platform !== 'win32') chmodSync(command, 0o755)
- }
-diff --git a/apps/desktop/scripts/prepare-dsh.ts b/apps/desktop/scripts/prepare-dsh.ts
-index a0698880..d920b323 100644
---- a/apps/desktop/scripts/prepare-dsh.ts
-+++ b/apps/desktop/scripts/prepare-dsh.ts
-@@ -44,7 +44,9 @@ const STORE_ROOT = BUILD_PATHS.pnpmStore
- const RUNTIME_ROOT = BUILD_PATHS.runtime
- const PNPM_BUILD_STATE = BUILD_PATHS.dshPnpm
- const PACKAGE_SET_ROOT = BUILD_PATHS.packageSet
--const NODE = join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
-+const NODE = process.platform === 'linux'
-+  ? join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'node', 'bin', 'node')
-+  : join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
- const PNPM = join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
- 
- function manifestVersion(path: string, subject: string): string {
-diff --git a/apps/desktop/scripts/prepare-runtime.ts b/apps/desktop/scripts/prepare-runtime.ts
-index 4e338532..b8e8c858 100644
---- a/apps/desktop/scripts/prepare-runtime.ts
-+++ b/apps/desktop/scripts/prepare-runtime.ts
-@@ -7,6 +7,7 @@ import { join } from 'node:path'
- import { parseArgs } from 'node:util'
- import { downloadArtifact } from '@electron/get'
- import extractZip from 'extract-zip'
-+import { lt } from 'semver'
- import { readPrimaryRuntime } from '../../../packages/skill/tool-workspace-dependencies/src/index.ts'
- import { desktopTargetPlatform, resolveDesktopBuildTarget, resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
- import { packagingStep } from './packaging-step.mjs'
-@@ -17,17 +18,19 @@ import { prepareCommandLink } from './prepare-command-link.ts'
- const BUILD_PATHS = resolveDesktopTargetBuildPaths()
- const RUNTIME_ROOT = BUILD_PATHS.runtime
- 
--type DesktopTarget = ReturnType<typeof desktopTargetPlatform>
-+type DesktopTarget = ReturnType<typeof desktopTargetPlatform> | { platform: 'linux'; arch: 'x64' }
- 
- /** Extract the target Electron distribution and return its embedded Node version. */
- async function prepareElectron({ platform, arch }: DesktopTarget): Promise<string> {
-   const require = createRequire(import.meta.url)
--  const { version } = require('electron/package.json') as { version: string }
-+  const { version: upstreamVersion } = require('electron/package.json') as { version: string }
-+  // Chromium 156 forwards the Wayland activation token from the system tray.
-+  const version = platform === 'linux' && lt(upstreamVersion, '45.5.0') ? '45.5.0' : upstreamVersion
-   const archive = await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'download:electron',
-     () => downloadArtifact({ version, platform, arch, artifactName: 'electron', cacheRoot: BUILD_PATHS.downloads }))
-   rmSync(BUILD_PATHS.electron, { recursive: true, force: true })
-   await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'extract:electron', () => extractZip(archive, { dir: BUILD_PATHS.electron }))
--  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
-+  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : platform === 'linux' ? 'electron' : 'Electron.app/Contents/MacOS/Electron')
-   return execFileSync(executable, ['-p', 'process.versions.node'], {
-     encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-   }).trim()
-@@ -50,7 +53,7 @@ function prepareCli({ platform, arch }: DesktopTarget): void {
- 
- async function main(): Promise<void> {
-   const { values } = parseArgs({ options: { 'defer-primary-runtime-smoke': { type: 'boolean', default: false } } })
--  const target = desktopTargetPlatform(resolveDesktopBuildTarget())
-+  const target = desktopTargetPlatform(resolveDesktopBuildTarget()) as DesktopTarget
-   rmSync(RUNTIME_ROOT, { recursive: true, force: true })
-   mkdirSync(RUNTIME_ROOT, { recursive: true })
-   const preparePrimary = () => packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:primary-runtime',
-@@ -65,7 +68,11 @@ async function main(): Promise<void> {
-     nodeVersion = await prepareElectron(target)
-     await preparePrimary()
-   }
--  const { pnpm } = await readPrimaryRuntime(join(RUNTIME_ROOT, 'primary-runtime'))
-+  const { pnpm, node } = await readPrimaryRuntime(join(RUNTIME_ROOT, 'primary-runtime'))
-+  if (target.platform === 'linux') {
-+    if (node === undefined) throw new Error('desktop runtime: primary-runtime manifest has no Node.js version')
-+    nodeVersion = node
-+  }
-   if (pnpm === undefined) throw new Error('desktop runtime: primary-runtime manifest has no pnpm version')
-   await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:cli', async () => { prepareCli(target) })
-   writeFileSync(join(RUNTIME_ROOT, 'versions.json'), `${JSON.stringify({
 diff --git a/apps/desktop/src/caption-controls.ts b/apps/desktop/src/caption-controls.ts
 new file mode 100644
 index 00000000..8ccb7490
@@ -257,19 +113,6 @@ index 00000000..8ccb7490
 +    host.remove()
 +  }, { once: true })
 +}
-diff --git a/apps/desktop/src/client/WelcomePage.tsx b/apps/desktop/src/client/WelcomePage.tsx
-index 6a63dc72..55e9674c 100644
---- a/apps/desktop/src/client/WelcomePage.tsx
-+++ b/apps/desktop/src/client/WelcomePage.tsx
-@@ -52,7 +52,7 @@ export function Welcome({ api }: { api: WelcomeApi }) {
-   useEffect(() => {
-     mounted.current = true
-     document.documentElement.lang = api.id
--    document.title = m.welcomeTitle
-+    document.title = process.env.DSH_CLIENT_TITLE ?? m.welcomeTitle
-     const takeNotice = (): void => {
-       void api.takeNotice().then((notice) => {
-         if (mounted.current && notice === 'session-expired') setExpiryNotice(true)
 diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
 index 83ebe741..911681ca 100644
 --- a/apps/desktop/src/ipc.ts
@@ -376,47 +219,24 @@ index ea261784..6ec83036 100644
    settingsMenu: 'Configurações…',
    aboutProduct: 'DeepSeek Harness',
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 291ed084..fada5580 100644
+index fa6657cd..5c28a428 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -72,6 +72,10 @@ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
+@@ -72,6 +72,8 @@ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
  import { DesktopTray } from './tray.ts'
  import { DesktopBackgroundNotice } from './background-notice.ts'
  
-+const linuxProductName = process.platform === 'linux' && app.isPackaged ? process.env.DSH_CLIENT_TITLE : undefined
-+/** Windows and Linux hide the native title bar and let the renderer own the caption row. */
-+const usesTitleBarOverlay = process.platform === 'win32' || process.platform === 'linux'
++const usesCustomCaption = process.platform === 'win32' || process.platform === 'linux'
 +
  let focusPrimaryWindow = (): void => {}
  let stopForRecovery = async (): Promise<void> => { await stopOperationReports() }
  let shuttingDown = false
-@@ -207,13 +211,16 @@ interface RuntimeResources {
- 
- function runtimeResources(): RuntimeResources {
-   const development = !app.isPackaged
--  const node = process.execPath
-+  const linuxPackage = !development && process.platform === 'linux'
-+  const node = linuxPackage
-+    ? join(process.resourcesPath, 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin', 'node')
-+    : process.execPath
-   const nodeBin = development ? join(app.getAppPath(), 'scripts', 'node-bin') : join(process.resourcesPath, 'runtime', 'bin')
-   const pnpm = (development ? process.env.DSH_DESKTOP_PNPM_ENTRY : undefined)
-     ?? (development ? join(app.getAppPath(), 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
-       : join(process.resourcesPath, 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs'))
-   const dsh = (development ? process.env.DSH_DESKTOP_DSH_DIR : undefined)
--    ?? (development ? join(app.getAppPath(), '.desktop-build', 'development', 'project') : join(app.getAppPath(), 'dsh'))
-+    ?? (development ? join(app.getAppPath(), '.desktop-build', 'development', 'project') : join(linuxPackage ? process.resourcesPath : app.getAppPath(), 'dsh'))
-   return { node, nodeBin, pnpm, dsh }
- }
- 
-@@ -268,11 +275,17 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+@@ -271,11 +273,15 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
      minWidth: 520,
      minHeight: 600,
      show,
 -    ...(process.platform === 'win32' && primary ? {
-+    ...(process.platform === 'linux' && app.isPackaged
-+      ? { title: linuxProductName ?? 'DeepSeek Harness', icon: join(process.resourcesPath, 'icon.png') } : {}),
-+    ...(usesTitleBarOverlay && primary ? {
++    ...(usesCustomCaption && primary ? {
        backgroundColor: chromeFallbackFill(),
        titleBarStyle: 'hidden' as const,
 -      titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
@@ -430,21 +250,21 @@ index 291ed084..fada5580 100644
      } : {}),
      // hiddenInset places traffic lights inside the sidebar; sidebar vibrancy
      // needs a transparent window background to show through the page.
-@@ -299,7 +312,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+@@ -302,7 +308,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
      if (['http:', 'https:'].includes(new URL(url).protocol)) void shell.openExternal(url)
      return { action: 'deny' }
    })
 -  if (process.platform === 'darwin' || process.platform === 'win32') {
-+  if (process.platform === 'darwin' || usesTitleBarOverlay) {
++  if (process.platform === 'darwin' || usesCustomCaption) {
      // Fullscreen hides native window controls; overlays drop their caption clearance.
      const sendFullscreen = (): void => {
        if (!window.isDestroyed()) window.webContents.send(DESKTOP_IPC.windowFullscreen, window.isFullScreen())
-@@ -310,13 +323,22 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+@@ -313,13 +319,22 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
      // current state so a fullscreen reload does not fall back to windowed CSS.
      window.webContents.on('did-finish-load', sendFullscreen)
    }
 -  if (process.platform === 'win32' && primary) {
-+  if (usesTitleBarOverlay && primary) {
++  if (usesCustomCaption && primary) {
      const updateBackground = (): void => {
        if (!window.isDestroyed()) window.setBackgroundColor(chromeFallbackFill())
      }
@@ -463,97 +283,55 @@ index 291ed084..fada5580 100644
    if (process.platform === 'darwin') {
      // Deminiaturize reattaches the NSVisualEffectView material late
      // (electron/electron#25368), so a transparent window shows the desktop
-@@ -472,7 +494,7 @@ async function main(): Promise<void> {
-   // Copy comes from the same locale as the update prompts so the dialog
-   // chrome and its content never mix languages.
-   const showAbout = async (): Promise<void> => {
--    await ordinaryMessageBox({ type: 'info', title: locale.messages.aboutMenu, message: locale.messages.aboutProduct,
-+    await ordinaryMessageBox({ type: 'info', title: locale.messages.aboutMenu, message: linuxProductName ?? locale.messages.aboutProduct,
-       detail: formatDesktopMessage(locale.messages.aboutVersion, { version: app.getVersion() }),
-       buttons: [locale.messages.updateAcknowledge], cancelId: 0 })
-   }
-@@ -1164,7 +1186,7 @@ async function main(): Promise<void> {
-   const applicationIconPath = development ? join(app.getAppPath(), 'resources', 'icon-windows.png')
-     : join(process.resourcesPath, 'icon.png')
-   app.setAboutPanelOptions({
--    applicationName: 'DeepSeek Harness',
-+    applicationName: linuxProductName ?? 'DeepSeek Harness',
-     applicationVersion: app.getVersion(),
-     // The release has no separate build number; omit Electron's bundle version.
-     version: '',
-@@ -1241,7 +1263,7 @@ async function main(): Promise<void> {
+@@ -1244,7 +1259,7 @@ async function main(): Promise<void> {
      devToolsF12Shortcut,
    ]
    const refreshApplicationMenu = (): void => {
 -    Menu.setApplicationMenu(Menu.buildFromTemplate(process.platform === 'win32'
-+    Menu.setApplicationMenu(Menu.buildFromTemplate(usesTitleBarOverlay
++    Menu.setApplicationMenu(Menu.buildFromTemplate(usesCustomCaption
        ? windowsDevToolsShortcuts : [{
          label: darwin ? app.name : currentDesktopLocale().messages.application,
          submenu: [...applicationItems(), devToolsF12Shortcut],
-@@ -1249,8 +1271,9 @@ async function main(): Promise<void> {
-     tray?.relabel()
-   }
-   refreshApplicationMenu()
--  const trayIconPath = development ? join(app.getAppPath(), 'resources', 'tray-windows.ico') : join(process.resourcesPath, 'tray.ico')
--  if (process.platform === 'win32') {
-+  const trayIconPath = process.platform === 'linux' ? applicationIconPath
-+    : development ? join(app.getAppPath(), 'resources', 'tray-windows.ico') : join(process.resourcesPath, 'tray.ico')
-+  if (usesTitleBarOverlay) {
-     // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
-     try {
-       tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
-@@ -1274,7 +1297,7 @@ async function main(): Promise<void> {
+@@ -1278,7 +1293,7 @@ async function main(): Promise<void> {
      ...(process.platform === 'win32' ? { icon: nativeImage.createFromPath(trayIconPath) } : {}),
    })
  
 -  if (process.platform === 'win32') {
-+  if (usesTitleBarOverlay) {
++  if (usesCustomCaption) {
      ipcMain.handle(DESKTOP_IPC.windowsMenu, (event, name: unknown, x: unknown, y: unknown) => {
        assertDesktopSender(event, ['app'])
        if (mainWindow === undefined || event.sender !== mainWindow.webContents
-@@ -1307,6 +1330,19 @@ async function main(): Promise<void> {
+@@ -1311,6 +1326,19 @@ async function main(): Promise<void> {
          Menu.buildFromTemplate(items).popup({ window, x: Math.round(x * zoom), y: Math.round(y * zoom), callback: resolve })
        })
      })
-+    if (process.platform === 'linux') {
-+      ipcMain.handle(DESKTOP_IPC.windowControl, (event, action: unknown) => {
-+        assertDesktopSender(event, ['app'])
-+        if (mainWindow === undefined || event.sender !== mainWindow.webContents
-+          || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('desktop window control: rejected sender')
-+        if (action === 'minimize') mainWindow.minimize()
-+        else if (action === 'toggle-maximize') {
-+          if (mainWindow.isMaximized()) mainWindow.unmaximize()
-+          else mainWindow.maximize()
-+        } else if (action === 'close') mainWindow.close()
-+        else throw new Error('desktop window control: invalid action')
-+      })
-+    }
++  }
++  if (process.platform === 'linux') {
++    ipcMain.handle(DESKTOP_IPC.windowControl, (event, action: unknown) => {
++      const window = assertProductSender(event)
++      if (action === 'minimize') window.minimize()
++      else if (action === 'toggle-maximize') {
++        if (window.isMaximized()) window.unmaximize()
++        else window.maximize()
++      } else if (action === 'close') window.close()
++      else throw new Error('desktop window control: invalid action')
++    })
++  }
++  if (process.platform === 'win32') {
      ipcMain.on(DESKTOP_IPC.windowsAppearance, (event, _language: unknown, color: unknown, symbolColor: unknown) => {
        if (mainWindow === undefined || event.sender !== mainWindow.webContents
          || event.senderFrame !== mainWindow.webContents.mainFrame) return
-@@ -1315,7 +1351,10 @@ async function main(): Promise<void> {
-       // Empty colors precede client stylesheet installation; only CSS color values cross IPC.
-       const validColor = (value: unknown): value is string => typeof value === 'string'
-         && /^(?:#[\da-f]{3,8}|rgba?\([\d.,%\s]+\))$/iu.test(value)
--      if (validColor(color) && validColor(symbolColor)) mainWindow.setTitleBarOverlay({ color, symbolColor })
-+      // Linux draws its own caption controls, so only Windows updates the native overlay.
-+      if (process.platform === 'win32' && validColor(color) && validColor(symbolColor)) {
-+        mainWindow.setTitleBarOverlay({ color, symbolColor })
-+      }
-     })
-   }
- 
-@@ -1381,7 +1420,7 @@ async function main(): Promise<void> {
+@@ -1385,7 +1413,7 @@ async function main(): Promise<void> {
      const window = mainWindow ?? createMainWindow()
      await navigateMain(applicationUrl)
      if (isQuitting() || recovery.active || window.isDestroyed()) return
 -    if (process.platform === 'win32') window.setBackgroundColor(chromeFallbackFill())
-+    if (usesTitleBarOverlay) window.setBackgroundColor(chromeFallbackFill())
++    if (usesCustomCaption) window.setBackgroundColor(chromeFallbackFill())
      if (activate) window.show()
      else window.showInactive()
      const wasInWorkspace = enteredWorkspace
 diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
-index 6b4e9896..cdba9a59 100644
+index 6b4e9896..61b4678e 100644
 --- a/apps/desktop/src/preload-app.ts
 +++ b/apps/desktop/src/preload-app.ts
 @@ -9,6 +9,7 @@ import { PLATFORM_IPC } from './platform-ipc.ts'
@@ -568,7 +346,7 @@ index 6b4e9896..cdba9a59 100644
      else body.setAttribute('tabindex', previous)
    })
    syncWindowsAppearance()
-+  if (process.platform === 'linux') installLinuxCaptionControls()
++  installLinuxCaptionControls()
    if (process.platform === 'win32') installMandatoryUpdateOverlay()
    contextBridge.exposeInMainWorld('__DSH_DIRECTORY_PICKER__', {
      pick: () => ipcRenderer.invoke(DESKTOP_IPC.directoryPick) as Promise<string | null>,
@@ -595,13 +373,13 @@ index 1e197b0c..24f0777f 100644
      const root = document.documentElement as HTMLElement | null
      if (root === null) return
 diff --git a/apps/desktop/src/preload-windows.ts b/apps/desktop/src/preload-windows.ts
-index 5b9ed756..03a5b07d 100644
+index 5b9ed756..c45a817b 100644
 --- a/apps/desktop/src/preload-windows.ts
 +++ b/apps/desktop/src/preload-windows.ts
 @@ -1,12 +1,12 @@
  import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 -/** Synchronizes Windows context menus and caption colors with the application document. */
-+/** Synchronizes Windows and Linux context menus and caption colors with the application document. */
++/** Synchronizes caption menus and the Windows native overlay with the application document. */
  import { ipcRenderer } from 'electron'
  import { DESKTOP_IPC } from './ipc.ts'
  import { installWindowsMenu } from './preload-menu.ts'
@@ -614,35 +392,22 @@ index 5b9ed756..03a5b07d 100644
    const mark = (): void => {
      const root = document.documentElement
      root.dataset.windowsTitlebar = ''
-diff --git a/apps/desktop/src/tray.ts b/apps/desktop/src/tray.ts
-index b2ce416b..63d8cc56 100644
---- a/apps/desktop/src/tray.ts
-+++ b/apps/desktop/src/tray.ts
-@@ -1,11 +1,11 @@
--/** Windows system tray: the always-present way back to a hidden window and the explicit quit entry. */
-+/** Windows and Linux system tray for reopening the window and requesting quit. */
- 
- import { Menu, nativeImage, Tray } from 'electron'
- import type { DesktopLocale } from './locale.ts'
- 
- /** Main-process actions the tray triggers; both run the same paths as the window and application menu. */
- export interface DesktopTrayOptions {
--  /** Multi-size ICO rendered by `scripts/render-tray-icon.ts`; Windows picks the bitmap for the display scale. */
-+  /** Windows multi-size tray ICO or Linux application PNG. */
-   readonly iconPath: string
-   readonly locale: () => DesktopLocale
-   /** Show and focus the primary window. */
-@@ -20,7 +20,9 @@ export class DesktopTray {
- 
-   /** @param options - Icon path, locale reader, and the open and quit actions. */
-   constructor(private readonly options: DesktopTrayOptions) {
--    const tray = new Tray(nativeImage.createFromPath(options.iconPath))
-+    const icon = nativeImage.createFromPath(options.iconPath)
-+    // Keep the Linux status notifier pixmap small while retaining enough detail for HiDPI panels.
-+    const tray = new Tray(process.platform === 'linux' ? icon.resize({ width: 64 }) : icon)
-     this.tray = tray
-     tray.on('click', () => { options.open() })
-     this.relabel()
+@@ -18,6 +18,15 @@ export function syncWindowsAppearance(): void {
+     mark()
+     const root = document.documentElement
+     const menu = installWindowsMenu()
++    if (process.platform === 'linux') {
++      const observer = new MutationObserver(menu.update)
++      observer.observe(root, { attributes: true, attributeFilter: ['lang'] })
++      window.addEventListener('pagehide', () => {
++        observer.disconnect()
++        menu.dispose()
++      }, { once: true })
++      return
++    }
+     const probe = document.createElement('span')
+     probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;background-color:var(--dsw-specific-sidebar-fill);color:var(--dsw-alias-label-primary)'
+     document.body.append(probe)
 diff --git a/apps/desktop/src/update-overlay.ts b/apps/desktop/src/update-overlay.ts
 index 0de12469..3c085be4 100644
 --- a/apps/desktop/src/update-overlay.ts
@@ -656,21 +421,6 @@ index 0de12469..3c085be4 100644
        view.setBounds({ x: 0, y: top, width, height: Math.max(0, height - top) })
      }
      const focus = (): void => {
-diff --git a/apps/desktop/src/welcome-window.ts b/apps/desktop/src/welcome-window.ts
-index 61fda9e3..d5457a11 100644
---- a/apps/desktop/src/welcome-window.ts
-+++ b/apps/desktop/src/welcome-window.ts
-@@ -58,7 +58,9 @@ let disposeActiveHandlers: (() => void) | undefined
-  */
- export async function openWelcomeWindow(locale: DesktopLocale, operations: WelcomeOperations): Promise<BrowserWindow> {
-   const options = welcomeWindowOptions(process.platform, locale)
--  const window = new BrowserWindow(options)
-+  const window = new BrowserWindow(process.platform === 'linux' && app.isPackaged
-+    ? { ...options, title: process.env.DSH_CLIENT_TITLE ?? locale.messages.welcomeTitle, icon: join(process.resourcesPath, 'icon.png') }
-+    : options)
-   disposeActiveHandlers?.()
-   let active = true
-   const disposeHandlers = (): void => {
 diff --git a/apps/desktop/tests/caption-controls.client.spec.ts b/apps/desktop/tests/caption-controls.client.spec.ts
 new file mode 100644
 index 00000000..1772edc4
@@ -718,35 +468,8 @@ index 00000000..1772edc4
 +  handler({}, false)
 +  expect(buttons[1]!.innerHTML).toContain('width="9" height="9"')
 +})
-diff --git a/apps/desktop/tests/fixtures/pnpm-smoke.mjs b/apps/desktop/tests/fixtures/pnpm-smoke.mjs
-index 5d16769a..e6ef261d 100644
---- a/apps/desktop/tests/fixtures/pnpm-smoke.mjs
-+++ b/apps/desktop/tests/fixtures/pnpm-smoke.mjs
-@@ -13,7 +13,12 @@ import { delimiter, join } from 'node:path'
-  * @returns {Promise<void>} Resolves after execution and removal of the private installation.
-  */
- export async function checkPnpm(resourcesRuntime) {
--  assert.ok(process.versions.electron, 'Run the package-manager smoke with Electron Node mode')
-+  if (process.platform === 'linux') {
-+    assert.equal(process.execPath, join(resourcesRuntime, 'primary-runtime', 'dependencies', 'node', 'bin', 'node'))
-+    assert.equal(process.versions.electron, undefined)
-+  } else {
-+    assert.ok(process.versions.electron, 'Run the package-manager smoke with Electron Node mode')
-+  }
-   assert.equal(existsSync(join(resourcesRuntime, 'pnpm')), false, 'Desktop must ship only primary-runtime pnpm')
-   const primary = join(resourcesRuntime, 'primary-runtime')
-   const pnpm = join(primary, 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
-@@ -36,7 +41,7 @@ export async function checkPnpm(resourcesRuntime) {
- const assert = require('node:assert/strict')
- assert.equal(require('desktop-pnpm-smoke-dependency').answer, 42)
- assert.equal(process.execPath, ${JSON.stringify(process.execPath)})
--assert.ok(process.versions.electron)
-+assert.equal(process.versions.electron, ${JSON.stringify(process.versions.electron)})
- assert.ok(process.execArgv.includes('--expose-internals'))
- assert.equal(typeof require('internal/modules/esm/loader').getOrInitializeCascadedLoader, 'function')
- console.log('desktop-node-script-ok')
 diff --git a/apps/desktop/tests/main-startup.spec.ts b/apps/desktop/tests/main-startup.spec.ts
-index e689f3e6..248a7ba8 100644
+index fb476214..8a0435c1 100644
 --- a/apps/desktop/tests/main-startup.spec.ts
 +++ b/apps/desktop/tests/main-startup.spec.ts
 @@ -121,6 +121,11 @@ const harness = await vi.hoisted(async () => {
@@ -761,7 +484,7 @@ index e689f3e6..248a7ba8 100644
      visible = true
      isVisible() { return this.visible }
      enabled = true
-@@ -837,7 +842,7 @@ describe('desktop main startup', () => {
+@@ -845,7 +850,7 @@ describe('desktop main startup', () => {
      expect(visible.filter(item => item.role === 'toggleDevTools')).toEqual([
        { role: 'toggleDevTools', label: messages.toggleDevToolsMenu },
      ])
@@ -770,7 +493,7 @@ index e689f3e6..248a7ba8 100644
        expect(harness.menu.mock.calls[0]![0]).toEqual([
          { role: 'toggleDevTools', visible: false },
          { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
-@@ -853,7 +858,7 @@ describe('desktop main startup', () => {
+@@ -861,7 +866,7 @@ describe('desktop main startup', () => {
      harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.localeChanged)![1](
        { sender, senderFrame: sender.mainFrame }, nextLocale,
      )
@@ -779,7 +502,7 @@ index e689f3e6..248a7ba8 100644
        : harness.menu.mock.lastCall![0][0]!.submenu as MenuItemConstructorOptions[]
      expect(refreshed.filter(item => item.role === 'toggleDevTools' && item.visible !== false)).toEqual([
        { role: 'toggleDevTools', label: nextLocale === 'en' ? en.toggleDevToolsMenu : zh.toggleDevToolsMenu },
-@@ -1154,7 +1159,7 @@ describe('desktop main startup', () => {
+@@ -1162,7 +1167,7 @@ describe('desktop main startup', () => {
      }
    })
  
@@ -788,7 +511,7 @@ index e689f3e6..248a7ba8 100644
      vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
      await import('../src/main.ts')
      await harness.preparing.promise
-@@ -1170,9 +1175,14 @@ describe('desktop main startup', () => {
+@@ -1178,9 +1183,14 @@ describe('desktop main startup', () => {
          { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
        ])
      } else {
@@ -805,7 +528,7 @@ index e689f3e6..248a7ba8 100644
      }
      expect(harness.hosts).toHaveLength(0)
    })
-@@ -1253,7 +1263,7 @@ describe('desktop main startup', () => {
+@@ -1261,7 +1271,7 @@ describe('desktop main startup', () => {
      expect((await handler(new Request('dsh-app://foreign/index.html'))).status).toBe(404)
    })
  
@@ -814,7 +537,7 @@ index e689f3e6..248a7ba8 100644
      vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
      await import('../src/main.ts')
      await harness.preparing.promise
-@@ -1276,16 +1286,6 @@ describe('desktop main startup', () => {
+@@ -1284,16 +1294,6 @@ describe('desktop main startup', () => {
      expect(sent()).toHaveLength(relayed)
    })
  
@@ -831,23 +554,10 @@ index e689f3e6..248a7ba8 100644
    it('covers the macOS vibrancy reattach gap with an opaque base while minimized or hidden', async () => {
      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
      await import('../src/main.ts')
-@@ -1358,6 +1358,42 @@ describe('desktop main startup', () => {
+@@ -1366,6 +1366,29 @@ describe('desktop main startup', () => {
      expect(harness.menu.setApplicationMenu).toHaveBeenCalledTimes(3)
    })
  
-+  it('registers the Linux caption controls without the native overlay', async () => {
-+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
-+    await import('../src/main.ts')
-+    await harness.preparing.promise
-+    const window = harness.windows[0]!
-+    const listener = harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.windowsAppearance)![1]
-+    const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
-+    listener(event, 'zh-CN', 'rgb(249, 250, 251)', '#0f1115')
-+    expect(window.setTitleBarOverlay).not.toHaveBeenCalled()
-+    expect(harness.handlers.has(DESKTOP_IPC.windowControl)).toBe(true)
-+    expect(harness.handlers.has(DESKTOP_IPC.windowsMenu)).toBe(true)
-+  })
-+
 +  it('drives the Linux caption actions and reports the maximized state', async () => {
 +    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
 +    await import('../src/main.ts')
@@ -874,7 +584,7 @@ index e689f3e6..248a7ba8 100644
    it('retains cached Chinese for a Host startup crash after the loading page reports English', async () => {
      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
      const directory = join(harness.app.getPath('userData'), 'desktop')
-@@ -1381,8 +1417,8 @@ describe('desktop main startup', () => {
+@@ -1389,23 +1412,27 @@ describe('desktop main startup', () => {
      expect((harness.dialog.showMessageBox.mock.calls[0]![0] as MessageBoxOptions).message).toBe(zh.fatalSummary)
    })
  
@@ -885,7 +595,17 @@ index e689f3e6..248a7ba8 100644
      await import('../src/main.ts')
      await harness.preparing.promise
      const window = harness.windows[0]!
-@@ -1396,8 +1432,10 @@ describe('desktop main startup', () => {
+     const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
+-    const appearance = harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.windowsAppearance)![1]
+     harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.localeChanged)![1](event, 'zh')
+-    appearance(event, 'zh-CN', '#fff', '#000')
++    if (platform === 'win32') {
++      const appearance = harness.ipcOn.mock.calls.find(([channel]) => channel === DESKTOP_IPC.windowsAppearance)![1]
++      appearance(event, 'zh-CN', '#fff', '#000')
++    }
+     const handler = harness.handlers.get(DESKTOP_IPC.windowsMenu)!
+     const foreignEvent = { ...event, sender: {} }
+     expect(() => handler(foreignEvent, 'application', 48, 34)).toThrow('rejected sender')
      expect(() => handler(event, 'arbitrary-command', 48, 34)).toThrow('invalid popup request')
      expect(() => handler(event, 'application', NaN, 34)).toThrow('invalid popup request')
      const application = handler(event, 'application', 48, 34)
@@ -898,7 +618,7 @@ index e689f3e6..248a7ba8 100644
      ])
      expect(harness.popup.mock.lastCall![0]).toMatchObject({ window, x: 48, y: 34 })
      expect(harness.popup.mock.lastCall![0].callback).toBeTypeOf('function')
-@@ -1419,8 +1457,8 @@ describe('desktop main startup', () => {
+@@ -1427,8 +1454,8 @@ describe('desktop main startup', () => {
      await edit
    })
  
@@ -909,7 +629,7 @@ index e689f3e6..248a7ba8 100644
      await import('../src/main.ts')
      await harness.preparing.promise
      const describeItem = (item: MenuItemConstructorOptions): string | undefined =>
-@@ -1429,27 +1467,36 @@ describe('desktop main startup', () => {
+@@ -1437,27 +1464,36 @@ describe('desktop main startup', () => {
        .map(call => call[0])
        .find(items => items.some(item => item.role === 'editMenu'))
      if (template === undefined) throw new Error('application menu missing')
@@ -953,7 +673,7 @@ index e689f3e6..248a7ba8 100644
 +      { role: 'toggleDevTools', visible: false, accelerator: 'F12' },
 +    ])
 +    expect(harness.handlers.has(DESKTOP_IPC.windowsMenu)).toBe(true)
-+    expect(harness.ipcOn.mock.calls.some(([channel]) => channel === DESKTOP_IPC.windowsAppearance)).toBe(true)
++    expect(harness.ipcOn.mock.calls.some(([channel]) => channel === DESKTOP_IPC.windowsAppearance)).toBe(false)
 +  })
 +
    it.each(['en-US', 'zh-CN'])('localizes macOS application commands without changing the application name (%s)', async (locale) => {
@@ -979,89 +699,72 @@ index 5b876ab3..b8a747ce 100644
    syncWindowFullscreen()
    expect(on).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC.windowFullscreen, expect.any(Function))
 diff --git a/apps/desktop/tests/preload-windows.client.spec.ts b/apps/desktop/tests/preload-windows.client.spec.ts
-index e59b7ebb..4e5d77fd 100644
+index e59b7ebb..4c5d4005 100644
 --- a/apps/desktop/tests/preload-windows.client.spec.ts
 +++ b/apps/desktop/tests/preload-windows.client.spec.ts
-@@ -17,15 +17,15 @@ afterEach(() => {
+@@ -3,9 +3,9 @@ import { afterEach, expect, it, vi } from 'vitest'
+ import { DESKTOP_IPC } from '../src/ipc.ts'
+ import { syncWindowsAppearance } from '../src/preload-windows.ts'
+ 
+-const send = vi.hoisted(() => vi.fn())
++const { send, updateMenu, disposeMenu } = vi.hoisted(() => ({ send: vi.fn(), updateMenu: vi.fn(), disposeMenu: vi.fn() }))
+ vi.mock('electron', () => ({ ipcRenderer: { send } }))
+-vi.mock('../src/preload-menu.ts', () => ({ installWindowsMenu: () => ({ update: vi.fn(), dispose: vi.fn() }) }))
++vi.mock('../src/preload-menu.ts', () => ({ installWindowsMenu: () => ({ update: updateMenu, dispose: disposeMenu }) }))
+ 
+ afterEach(() => {
+   window.dispatchEvent(new Event('pagehide'))
+@@ -15,16 +15,18 @@ afterEach(() => {
+   document.body.removeAttribute('data-ds-dark-theme')
+   vi.restoreAllMocks()
    send.mockClear()
++  updateMenu.mockClear()
++  disposeMenu.mockClear()
  })
  
 -it.each(['darwin', 'linux'] as const)('does not install Windows controls on %s', (platform) => {
-+it.each(['darwin'] as const)('does not install caption controls on %s', (platform) => {
-   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
+-  vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
++it('does not install caption controls on macOS', () => {
++  vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
    syncWindowsAppearance()
    expect(document.documentElement.hasAttribute('data-windows-titlebar')).toBe(false)
    expect(send).not.toHaveBeenCalled()
  })
  
 -it('synchronizes live language and palette changes and stops observing a closed document', async () => {
--  vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
-+it.each(['win32', 'linux'] as const)('synchronizes live language and palette changes on %s and stops observing a closed document', async (platform) => {
-+  vi.spyOn(process, 'platform', 'get').mockReturnValue(platform)
++it('synchronizes live language and palette changes on Windows and stops observing a closed document', async () => {
+   vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
    vi.spyOn(document, 'readyState', 'get').mockReturnValue('loading')
    vi.spyOn(globalThis, 'getComputedStyle').mockImplementation(() => ({
-     backgroundColor: document.body.hasAttribute('data-ds-dark-theme') ? 'oklch(0.2 0 0)' : 'hsl(0 0% 100%)',
-diff --git a/apps/desktop/tests/tray.spec.ts b/apps/desktop/tests/tray.spec.ts
-index 11c3a488..7afd8dbd 100644
---- a/apps/desktop/tests/tray.spec.ts
-+++ b/apps/desktop/tests/tray.spec.ts
-@@ -13,9 +13,10 @@ const native = await vi.hoisted(async () => {
-     constructor(readonly image: unknown) { super(); trays.push(this) }
-   }
-   const menus: MenuItemConstructorOptions[][] = []
-+  const resize = vi.fn(({ width }: { width: number }) => ({ width }))
-   return {
--    trays, FakeTray, menus,
--    createFromPath: vi.fn((path: string) => ({ path })),
-+    trays, FakeTray, menus, resize,
-+    createFromPath: vi.fn((path: string) => ({ path, resize })),
-     buildFromTemplate: vi.fn((template: MenuItemConstructorOptions[]) => { menus.push(template); return { template } }),
-   }
+@@ -53,3 +55,28 @@ it('synchronizes live language and palette changes and stops observing a closed
+   await new Promise<void>((resolve) => { queueMicrotask(resolve) })
+   expect(send).not.toHaveBeenCalled()
  })
-@@ -25,13 +26,13 @@ vi.mock('electron', () => ({
-   Menu: { buildFromTemplate: native.buildFromTemplate },
- }))
- 
--afterEach(() => { native.trays.length = 0; native.menus.length = 0; vi.clearAllMocks() })
-+afterEach(() => { native.trays.length = 0; native.menus.length = 0; vi.clearAllMocks(); vi.unstubAllGlobals() })
- 
--function setup(locale = 'en') {
--  let current = resolveDesktopLocale(locale)
-+function setup(iconPath = 'C:/app/resources/tray.ico') {
-+  let current = resolveDesktopLocale('en')
-   const open = vi.fn()
-   const quit = vi.fn()
--  const tray = new DesktopTray({ iconPath: 'C:/app/resources/tray.ico', locale: () => current, open, quit })
-+  const tray = new DesktopTray({ iconPath, locale: () => current, open, quit })
-   return { tray, open, quit, native: native.trays[0]!, setLocale: (next: string) => { current = resolveDesktopLocale(next) } }
- }
- 
-@@ -40,14 +41,24 @@ function labels(menu: MenuItemConstructorOptions[]): (string | undefined)[] {
- }
- 
- it('shows the application icon with its name as the tooltip and an Open / Quit menu', () => {
-+  vi.stubGlobal('process', { ...process, platform: 'win32' })
-   const f = setup()
-   expect(native.createFromPath).toHaveBeenCalledWith('C:/app/resources/tray.ico')
--  expect(f.native.image).toEqual({ path: 'C:/app/resources/tray.ico' })
-+  expect(f.native.image).toEqual({ path: 'C:/app/resources/tray.ico', resize: native.resize })
-+  expect(native.resize).not.toHaveBeenCalled()
-   expect(f.native.setToolTip).toHaveBeenCalledWith('DeepSeek Harness')
-   expect(labels(native.menus[0]!)).toEqual(['Open DeepSeek Harness', 'separator', 'Quit DeepSeek Harness'])
-   expect(f.native.setContextMenu).toHaveBeenCalledWith({ template: native.menus[0] })
- })
- 
-+it('resizes the Linux application PNG for the status notifier', () => {
-+  vi.stubGlobal('process', { ...process, platform: 'linux' })
-+  const f = setup('/opt/dsh-linux/resources/icon.png')
-+  expect(native.createFromPath).toHaveBeenCalledWith('/opt/dsh-linux/resources/icon.png')
-+  expect(native.resize).toHaveBeenCalledExactlyOnceWith({ width: 64 })
-+  expect(f.native.image).toEqual({ width: 64 })
-+})
 +
- it('opens the window on a single click and routes menu entries to the open and quit actions', () => {
-   const f = setup()
-   f.native.emit('click')
++it('refreshes the Linux caption menu on language changes without sampling or sending palette colors', async () => {
++  vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
++  vi.spyOn(document, 'readyState', 'get').mockReturnValue('loading')
++  const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext')
++  syncWindowsAppearance()
++  window.dispatchEvent(new Event('DOMContentLoaded'))
++  expect(document.documentElement.hasAttribute('data-windows-titlebar')).toBe(true)
++  expect(document.documentElement.style.getPropertyValue('--dsh-windows-titlebar-height')).toBe('40px')
++
++  document.documentElement.lang = 'zh-CN'
++  await new Promise<void>((resolve) => { queueMicrotask(resolve) })
++  expect(updateMenu).toHaveBeenCalledOnce()
++  document.body.setAttribute('data-ds-dark-theme', '')
++  await new Promise<void>((resolve) => { queueMicrotask(resolve) })
++  expect(updateMenu).toHaveBeenCalledOnce()
++  expect(getContext).not.toHaveBeenCalled()
++  expect(send).not.toHaveBeenCalled()
++
++  window.dispatchEvent(new Event('pagehide'))
++  expect(disposeMenu).toHaveBeenCalledOnce()
++  document.documentElement.lang = 'en'
++  await new Promise<void>((resolve) => { queueMicrotask(resolve) })
++  expect(updateMenu).toHaveBeenCalledOnce()
++})
 diff --git a/apps/desktop/tests/update-dialog.spec.ts b/apps/desktop/tests/update-dialog.spec.ts
 index 29cbf832..4b82882b 100644
 --- a/apps/desktop/tests/update-dialog.spec.ts
@@ -1090,112 +793,3 @@ index bd59d15d..137570c8 100644
    expect(f.views[0]!.setBounds).toHaveBeenCalledWith({ x: 0, y: top, width: 900, height: 650 - top })
    f.parent.emit('resize'); expect(f.views[0]!.setBounds).toHaveBeenCalledTimes(2)
    overlay.destroy()
-diff --git a/apps/desktop/tsdown.config.ts b/apps/desktop/tsdown.config.ts
-index ddf9c2d6..63287dbf 100644
---- a/apps/desktop/tsdown.config.ts
-+++ b/apps/desktop/tsdown.config.ts
-@@ -29,8 +29,9 @@ const clientEnvironment = resolveClientBuildEnvironment(process.env.DSH_CLIENT_V
- const clientVersion = clientEnvironment.DSH_CLIENT_VERSION
- if (clientVersion === undefined) throw new Error('desktop build: the client environment carries no DSH_CLIENT_VERSION')
- 
--/** Inline the one public build value the Node entry reads; every other variable stays a runtime lookup. */
--const clientVersionDefine = { 'process.env.DSH_CLIENT_VERSION': JSON.stringify(clientVersion) }
-+const clientTitle = clientEnvironment.DSH_CLIENT_TITLE
-+const clientTitleDefine = clientTitle === undefined ? {} : { 'process.env.DSH_CLIENT_TITLE': JSON.stringify(clientTitle) }
-+const clientDefines = { ...clientTitleDefine, 'process.env.DSH_CLIENT_VERSION': JSON.stringify(clientVersion) }
- 
- export default defineConfig([
-   {
-@@ -56,7 +57,7 @@ export default defineConfig([
-   {
-     entry: ['lib/types/main.js'],
-     plugins: [packagedImportsPlugin(mainProcessImports)],
--    define: clientVersionDefine,
-+    define: clientDefines,
-     onSuccess: async () => {
-       await build({
-         configFile: false,
-@@ -74,7 +75,7 @@ export default defineConfig([
-         }],
-         root: fileURLToPath(new URL('.', import.meta.url)),
-         esbuild: { jsx: 'automatic' },
--        define: { 'process.env.NODE_ENV': JSON.stringify('production') },
-+        define: { ...clientTitleDefine, 'process.env.NODE_ENV': JSON.stringify('production') },
-         build: {
-           outDir: 'lib/welcome',
-           emptyOutDir: true,
-diff --git a/packages/client/ui-brand-official/src/client/index.ts b/packages/client/ui-brand-official/src/client/index.ts
-index e5dc78b0..a706549c 100644
---- a/packages/client/ui-brand-official/src/client/index.ts
-+++ b/packages/client/ui-brand-official/src/client/index.ts
-@@ -1,4 +1,4 @@
--/** Official DeepSeek Harness occupants: the profile-gated sidebar brand slots and the home whale frame layer. */
-+/** DeepSeek Harness sidebar branding and the home whale frame layer. */
- import type { Context as ClientContext } from '@deepseek-ai/cordis'
- import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
- import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-@@ -18,7 +18,7 @@ export function apply(ctx: ClientContext): void {
-     name: 'conversation.hero.frame',
-     id: 'pixel-whale',
-   }, PixelWhale))
--  if (process.env.DSH_CLIENT_BUILD_PROFILE !== 'official') return
-+  if (process.env.DSH_CLIENT_BUILD_PROFILE !== 'official' && document.documentElement.dataset.platform !== 'linux') return
-   ctx.slots.inject('sidebar.brand.mark', () =>
-     ctx.slots.inject('sidebar.brand.name', function* () {
-       yield ctx.slots.register({ name: 'sidebar.brand.mark' }, OfficialBrandMark)
-diff --git a/packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx b/packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx
-index 306023be..4086b2b5 100644
---- a/packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx
-+++ b/packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx
-@@ -9,6 +9,7 @@ import { apply as hostApply } from '../src/index.ts'
- 
- afterEach(() => {
-   cleanup()
-+  delete document.documentElement.dataset.platform
-   vi.unstubAllEnvs()
-   vi.restoreAllMocks()
-   vi.unstubAllGlobals()
-@@ -55,8 +56,12 @@ describe('official browser-brand plugin', () => {
-     expect(subject.slots.entries('conversation.hero.frame')).toHaveLength(1)
-   })
- 
--  it('fills declarations before or after apply and removes every occupant on teardown', async () => {
--    vi.stubEnv('DSH_CLIENT_BUILD_PROFILE', 'official')
-+  it.each([
-+    { profile: 'official', platform: undefined },
-+    { profile: 'local', platform: 'linux' },
-+  ])('fills and removes brand slots for profile $profile on platform $platform', async ({ profile, platform }) => {
-+    vi.stubEnv('DSH_CLIENT_BUILD_PROFILE', profile)
-+    if (platform !== undefined) document.documentElement.dataset.platform = platform
-     const before = await bench()
-     const fiber = before.ctx.plugin({ inject: [...inject], apply })
-     await fiber.await()
-diff --git a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
-index 2be8c621..22ec06ce 100644
---- a/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
-+++ b/packages/client/ui-sidebar/src/client/SidebarRoot.tsx
-@@ -316,10 +316,10 @@ export function SidebarRoot({
-               <span className={css.brandName}>
-                 {renderSlot('sidebar.brand.name', {}, {
-                   fallback: buildVersion === undefined
--                    ? <span className={css.fallbackBrandName}>{t('brand.localBuild')}</span>
-+                    ? <span className={css.fallbackBrandName}>{process.env.DSH_CLIENT_TITLE ?? t('brand.localBuild')}</span>
-                     : (
-                       <span className={clsx(css.localBuildBrand, css.copyVersion)} data-copy-version onClick={copyVersion(buildVersion)}>
--                        <span className={css.localBuildTitle}>{t('brand.localBuild')}</span>
-+                        <span className={css.localBuildTitle}>{process.env.DSH_CLIENT_TITLE ?? t('brand.localBuild')}</span>
-                         <span className={css.buildVersion}>{buildVersion}</span>
-                       </span>
-                     ),
-diff --git a/scripts/client-build-environment.ts b/scripts/client-build-environment.ts
-index 6eed371b..1d7115e4 100644
---- a/scripts/client-build-environment.ts
-+++ b/scripts/client-build-environment.ts
-@@ -206,6 +206,7 @@ export function resolveClientBuildEnvironment(
-       DSH_CLIENT_VERSION: version,
-       ...(profile === 'official' ? OFFICIAL_CLIENT_BUILD_ENVIRONMENT : {
-         DSH_CLIENT_BUILD_PROFILE: 'local',
-+        ...(environment.DSH_CLIENT_TITLE === undefined ? {} : { DSH_CLIENT_TITLE: environment.DSH_CLIENT_TITLE }),
-         ...(environment.DSH_CLIENT_GIT_DIRTY === 'true' ? { DSH_CLIENT_GIT_DIRTY: 'true' } : {}),
-       }),
-     }

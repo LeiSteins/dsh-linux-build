@@ -37,25 +37,62 @@ if [[ -n ${UPSTREAM_REVISION:-} && "$revision" != "$UPSTREAM_REVISION" ]]; then
   exit 1
 fi
 
-export DSH_CLIENT_TITLE='Deepseek Harness'
+export DSH_DESKTOP_LINUX_CLIENT_TITLE='Deepseek Harness'
 export DSH_DESKTOP_BUILD_VERSION="$version"
 export DSH_DESKTOP_APP_ID=io.github.leisteins.dshlinux
 export DSH_DESKTOP_TARGET_PLATFORM=linux DSH_DESKTOP_TARGET_ARCH=x64 DSH_DESKTOP_UNSIGNED=1
 export DSH_DESKTOP_BUILD_COMMIT="$revision" DSH_DESKTOP_BUILD_DIRTY=1 DSH_TELEMETRY_DISABLED=1
 
-if ! git apply --check "$repo/patches/linux-x64.patch"; then
-  echo "Linux 补丁需要同步至 $tag。" >&2
-  exit 1
-fi
-git apply "$repo/patches/linux-x64.patch"
-install -m 644 "$repo/packaging/electron-builder-linux.config.mjs" apps/desktop/electron-builder-linux.config.mjs
-install -m 644 "$repo/packaging/smoke-linux.mts" apps/desktop/scripts/smoke-linux.mts
-
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
 
+# Validate each patch against the preceding result without modifying the checkout.
+patch_index="$stage/patch-index"
+GIT_INDEX_FILE="$patch_index" git read-tree "$revision"
+patches=(
+  0001-linux-build-runtime.patch
+  0002-linux-tray.patch
+  0003-linux-caption.patch
+  0004-linux-branding.patch
+)
+for patch in "${patches[@]}"; do
+  if ! GIT_INDEX_FILE="$patch_index" git apply --cached "$repo/patches/$patch"; then
+    echo "Linux 补丁 $patch 需要同步至 $tag。" >&2
+    exit 1
+  fi
+done
+if ! GIT_INDEX_FILE="$patch_index" git diff --cached --binary --no-ext-diff --no-textconv --no-color \
+  --src-prefix=a/ --dst-prefix=b/ "$revision" | git apply; then
+  echo "无法将 Linux 补丁写入 $tag 的检出目录。" >&2
+  exit 1
+fi
+install -m 644 "$repo/packaging/electron-builder-linux.config.mjs" apps/desktop/electron-builder-linux.config.mjs
+install -m 644 "$repo/packaging/smoke-linux.mts" apps/desktop/scripts/smoke-linux.mts
+
 pnpm install --frozen-lockfile
+pnpm exec vitest run \
+  scripts/client-build-environment.client.spec.ts \
+  apps/desktop/tests/desktop-build-paths.spec.ts \
+  apps/desktop/tests/runtime-preparation.spec.ts \
+  apps/desktop/tests/prepare-package-set.spec.ts \
+  apps/desktop/tests/retain-desktop-ci.spec.ts \
+  apps/desktop/tests/main-startup.spec.ts \
+  apps/desktop/tests/tray.spec.ts \
+  apps/desktop/tests/caption-controls.client.spec.ts \
+  apps/desktop/tests/preload-menu.client.spec.ts \
+  apps/desktop/tests/preload-platform.client.spec.ts \
+  apps/desktop/tests/preload-windows.client.spec.ts \
+  apps/desktop/tests/update-dialog.spec.ts \
+  apps/desktop/tests/update-overlay.spec.ts \
+  apps/desktop/tests/welcome-window.spec.ts \
+  apps/desktop/tests/pack-local-packages.spec.ts \
+  packages/client/ui-brand-official/tests/browser-plugin.client.spec.tsx
 pnpm run build:artifacts --profile local
+if ! jq -e --arg title "$DSH_DESKTOP_LINUX_CLIENT_TITLE" \
+  '.environment.DSH_CLIENT_TITLE == $title' .dsh-build/client-build-environment.json >/dev/null; then
+  echo '构建记录缺少社区 Linux 客户端标题。' >&2
+  exit 1
+fi
 
 # Follow upstream package-target.ts to prepare the local package closure and embedded runtimes.
 target_build="$upstream/apps/desktop/.desktop-build/targets/linux-x64"
@@ -111,7 +148,7 @@ mkdir "$stage/appimage-test"
 (
   cd "$stage/appimage-test"
   "$stage/${packages[2]}" --appimage-extract dsh-linux.desktop >/dev/null
-  grep -Fx "Name=$DSH_CLIENT_TITLE" squashfs-root/dsh-linux.desktop
+  grep -Fx "Name=$DSH_DESKTOP_LINUX_CLIENT_TITLE" squashfs-root/dsh-linux.desktop
   grep -Fx 'Icon=dsh-linux' squashfs-root/dsh-linux.desktop
   "$stage/${packages[2]}" --appimage-extract "${launcher_icon#/}" >/dev/null
   test -s "squashfs-root$launcher_icon"
@@ -125,7 +162,7 @@ cd -- "$output"
 sha256sum -- "${packages[@]}" > SHA256SUMS
 {
   printf 'Upstream repository: https://github.com/%s\n' "$UPSTREAM_REPOSITORY"
-  printf 'Application: %s\nVersion: %s\n' "$DSH_CLIENT_TITLE" "$version"
+  printf 'Application: %s\nVersion: %s\n' "$DSH_DESKTOP_LINUX_CLIENT_TITLE" "$version"
   printf 'Upstream tag: %s\nUpstream commit: %s\n' "$tag" "$revision"
   printf 'Packaging commit: %s\n' "$(git -C "$repo" rev-parse HEAD)"
   if [[ -n ${GITHUB_RUN_ID:-} ]]; then

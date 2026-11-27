@@ -18,9 +18,9 @@ AppImage 无法使用 FUSE 时，可以运行 `./文件名.AppImage --appimage-e
 
 [构建工作流](https://github.com/LeiSteins/dsh-linux-build/actions/workflows/build-linux.yml) 每天北京时间 00:00 检查上游最新的非草稿 Release。对应版本已有三种安装包以及 `SHA256SUMS` 和 `BUILD-INFO.txt` 时，定时任务跳过构建。手动运行可指定 `upstream_tag`，也可以取消 `publish`，只保留 Actions 产物。已发布且资产齐全的版本默认跳过构建；勾选 `rebuild` 可强制重新构建，新文件保留在 Actions 供维护者验证；勾选 `overwrite` 会重新构建并覆盖已公开版本的全部资产（隐含发布）。如果已公开的版本缺少部分资产，发布作业会补传缺失文件并重新校验。工作流产物保留 30 天。
 
-构建按上游标签对应的提交检出源码，使用其锁定的 Node.js、pnpm 和依赖。Linux 安装包至少使用 Electron 45.5.0，让支持传递激活令牌的 Wayland 托盘可以恢复最小化的窗口。Linux 补丁让桌面 Host 和 CLI 使用应用自带的 Node.js，以避免 Electron 的 Node 模式与 `sharp` 在 Linux 下发生 GLib 冲突。工作流验证打包后的 Host、图片解码、PTY、离线插件安装与 Office 转换，再从同一份桌面构建生成三个格式。发布作业核对 GitHub 收到的文件大小和 SHA-256，校验齐全后公开 Release。
+构建按上游标签对应的提交检出源码，使用其锁定的 Node.js、pnpm 和依赖。Linux 安装包至少使用 Electron 45.5.0，让支持传递激活令牌的 Wayland 托盘可以恢复最小化的窗口。Linux 补丁让桌面 Host 和 CLI 使用应用自带的 Node.js，以避免 Electron 的 Node 模式与 `sharp` 在 Linux 下发生 GLib 冲突。工作流先执行构建配置、运行时准备、标题栏和托盘等定向测试，再验证打包后的 Host、图片解码、PTY、离线插件安装与 Office 转换，最后从同一份桌面构建生成三个格式。发布作业核对 GitHub 收到的文件大小和 SHA-256，校验齐全后公开 Release。
 
-如果新上游版本无法应用补丁，请根据失败日志更新 `patches/linux-x64.patch`，先手动运行一次构建验证，再发布对应版本。裸机 Wayland、中文输入法和账号登录属于发布后的桌面兼容性测试，当前 CI 覆盖运行时和包结构。
+构建按编号应用 [运行时、托盘、标题栏和品牌补丁](patches/)。整个补丁序列通过检查后才写入上游检出目录。如果新上游版本出现冲突，请根据日志中的补丁文件名更新相应改动，手动构建验证后再发布。裸机 Wayland、中文输入法和账号登录需要桌面环境实测。
 
 ## 本地构建
 
