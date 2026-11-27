@@ -18,7 +18,7 @@ package_names() {
 
 asset_names() {
   package_names "$1"
-  printf '%s\n' SHA256SUMS BUILD-INFO.txt
+  printf '%s\n' SHA256SUMS
 }
 
 find_release() {

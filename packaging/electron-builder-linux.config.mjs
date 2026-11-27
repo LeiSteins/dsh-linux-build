@@ -12,6 +12,10 @@ if (!productName) throw new Error('DSH_DESKTOP_LINUX_CLIENT_TITLE is required fo
 const executableName = 'dsh-linux'
 const maintainer = 'DSH Linux (Community) <noreply@github.com>'
 const homepage = 'https://github.com/deepseek-ai/deepseek-harness'
+const repository = process.env.GITHUB_REPOSITORY ?? 'LeiSteins/dsh-linux-build'
+const match = /^([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)$/u.exec(repository)
+if (!match || match[2] === '.' || match[2] === '..') throw new Error('Expected GITHUB_REPOSITORY in owner/repo format')
+const [, owner, repo] = match
 export default {
   ...config,
   electronVersion: readFileSync(join(electron, 'version'), 'utf8').trim(),
@@ -19,6 +23,8 @@ export default {
   executableName,
   artifactName: 'dsh-linux-${version}-${arch}.${ext}',
   extraMetadata: { ...config.extraMetadata, homepage, desktopName: `${executableName}.desktop` },
+  // electron-builder embeds this provider in resources/app-update.yml even with --publish never.
+  publish: [{ provider: 'github', owner, repo, publishAutoUpdate: false }],
   linux: { ...config.linux, icon: join(root, 'linux-icons'), maintainer, syncDesktopName: true },
   toolsets: { appimage: '1.0.3' },
   files: config.files.filter(entry => typeof entry === 'string'),

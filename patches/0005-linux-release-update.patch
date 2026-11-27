@@ -1,0 +1,680 @@
+diff --git a/apps/desktop/src/ipc.ts b/apps/desktop/src/ipc.ts
+index 911681ca..f6b59cd6 100644
+--- a/apps/desktop/src/ipc.ts
++++ b/apps/desktop/src/ipc.ts
+@@ -105,7 +105,7 @@ export interface DshDesktopProductApi {
+    */
+   deviceInfo(): Promise<string>
+   readonly updates: {
+-    readonly channels: DesktopChannelBridge
++    readonly channels?: DesktopChannelBridge
+     status(): Promise<DesktopUpdatePresentation>
+     open(): Promise<void>
+     subscribe(listener: (state: DesktopUpdatePresentation) => void): () => void
+diff --git a/apps/desktop/src/linux-release-update.ts b/apps/desktop/src/linux-release-update.ts
+new file mode 100644
+index 00000000..5724c19b
+--- /dev/null
++++ b/apps/desktop/src/linux-release-update.ts
+@@ -0,0 +1,118 @@
++/** Read the public DSH Linux release list for user-initiated update checks. */
++
++import { gt, valid } from 'semver'
++import { load } from 'js-yaml'
++
++const installerSuffixes = { deb: 'amd64.deb', rpm: 'x86_64.rpm', appimage: 'x86_64.AppImage' } as const
++
++/** Result of reading community releases, including preview releases. */
++export type LinuxReleaseUpdate =
++  | { readonly kind: 'available'; readonly version: string; readonly url: string; readonly installer?: string }
++  | { readonly kind: 'current' | 'incomplete' | 'network-error' | 'service-error' }
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++}
++
++function githubRepository(appUpdateConfig: string): string {
++  const config: unknown = load(appUpdateConfig)
++  if (!isRecord(config) || config.provider !== 'github'
++    || (config.host !== undefined && config.host !== 'github.com')
++    || (config.protocol !== undefined && config.protocol !== 'https')
++    || (config.private !== undefined && config.private !== false)
++    || typeof config.owner !== 'string' || !/^[A-Za-z0-9-]+$/u.test(config.owner)
++    || typeof config.repo !== 'string' || !/^[A-Za-z0-9_.-]+$/u.test(config.repo)
++    || config.repo === '.' || config.repo === '..') {
++    throw new Error('Linux app-update.yml must configure a public GitHub repository')
++  }
++  return `${config.owner}/${config.repo}`
++}
++
++function installerName(version: string, suffix: string): string {
++  return `dsh-linux-${version}-${suffix}`
++}
++
++function hasReleaseAssets(assets: unknown, version: string): boolean {
++  if (!Array.isArray(assets)) return false
++  const uploaded = new Set<string>()
++  for (const asset of assets) {
++    if (isRecord(asset) && typeof asset.name === 'string' && asset.state === 'uploaded'
++      && typeof asset.size === 'number' && asset.size > 0) uploaded.add(asset.name)
++  }
++  return uploaded.has('SHA256SUMS')
++    && Object.values(installerSuffixes).every(suffix => uploaded.has(installerName(version, suffix)))
++}
++
++/**
++ * Find the newest complete community release by version across all pages.
++ * @param appUpdateConfig - Bundled electron-builder app-update.yml content.
++ * @param currentVersion - Version of the running application.
++ * @param packageType - Installer format recorded by the Linux build.
++ * @param request - Main-process HTTPS transport.
++ * @param signal - Cancels the check when the prompt closes or the app quits.
++ * @returns The release page and matching installer, or the reason an update is unavailable.
++ */
++export async function checkLinuxReleaseUpdate(
++  appUpdateConfig: string,
++  currentVersion: string,
++  packageType: string | undefined,
++  request: (url: string, init: RequestInit) => Promise<Response>,
++  signal: AbortSignal,
++): Promise<LinuxReleaseUpdate> {
++  signal.throwIfAborted()
++  if (valid(currentVersion) !== currentVersion) return { kind: 'service-error' }
++  const repository = githubRepository(appUpdateConfig)
++  const releasesApi = `https://api.github.com/repos/${repository}/releases`
++  const releasesPage = `https://github.com/${repository}/releases`
++  const deadline = AbortSignal.any([signal, AbortSignal.timeout(15_000)])
++  let best: string | undefined
++  let incomplete = false
++  for (let page = 1; ; page++) {
++    let response: Response
++    try {
++      response = await request(`${releasesApi}?per_page=100&page=${page}`, {
++        headers: { Accept: 'application/vnd.github+json' },
++        credentials: 'omit',
++        redirect: 'error',
++        signal: deadline,
++      })
++    } catch (error) {
++      signal.throwIfAborted()
++      console.warn('Linux update check: could not reach GitHub', error)
++      return { kind: 'network-error' }
++    }
++    if (!response.ok) {
++      console.warn('Linux update check: GitHub returned HTTP', response.status)
++      return { kind: 'service-error' }
++    }
++    let releases: unknown
++    try {
++      releases = await response.json()
++    } catch (error) {
++      signal.throwIfAborted()
++      console.warn('Linux update check: could not read GitHub releases', error)
++      return { kind: deadline.aborted ? 'network-error' : 'service-error' }
++    }
++    if (!Array.isArray(releases)) return { kind: 'service-error' }
++    for (const release of releases) {
++      if (!isRecord(release) || release.draft !== false || typeof release.tag_name !== 'string'
++        || !release.tag_name.startsWith('dsh-v')) continue
++      const version = release.tag_name.slice('dsh-v'.length)
++      if (valid(version) !== version || !gt(version, currentVersion)) continue
++      if (!hasReleaseAssets(release.assets, version)) {
++        incomplete = true
++      } else if (best === undefined || gt(version, best)) {
++        best = version
++      }
++    }
++    // Follow pagination without trusting a response-supplied URL.
++    if (!/(?:^|,)\s*<[^>]+>;\s*rel="next"/u.test(response.headers.get('link') ?? '')) break
++  }
++  signal.throwIfAborted()
++  if (best === undefined) return { kind: incomplete ? 'incomplete' : 'current' }
++  const suffix = Object.entries(installerSuffixes).find(([type]) => type === packageType)?.[1]
++  return {
++    kind: 'available', version: best, url: `${releasesPage}/tag/dsh-v${best}`,
++    ...(suffix === undefined ? {} : { installer: installerName(best, suffix) }),
++  }
++}
+diff --git a/apps/desktop/src/locale.ts b/apps/desktop/src/locale.ts
+index 6ec83036..e19e1f97 100644
+--- a/apps/desktop/src/locale.ts
++++ b/apps/desktop/src/locale.ts
+@@ -159,6 +159,7 @@ export const en = {
+   updateTechnicalDetails: 'View technical details',
+   updateTitle: 'DeepSeek Harness Update',
+   updateAvailable: 'New version available: {version}',
++  linuxUpdateInstaller: 'Download and install {file}.',
+   updateDetail: 'Once the download is complete, you can install the update and restart the app.',
+   installAndRestart: 'Install and Restart',
+   later: 'Later',
+@@ -359,6 +360,7 @@ export const zh = {
+   updateTechnicalDetails: '查看技术详情',
+   updateTitle: 'DeepSeek Harness 更新',
+   updateAvailable: '发现新版本 {version}',
++  linuxUpdateInstaller: '请下载并安装 {file}。',
+   updateDetail: '下载完成后，可安装并重启应用。',
+   installAndRestart: '安装并重启',
+   later: '稍后',
+@@ -557,6 +559,7 @@ export const ja = {
+   updateTechnicalDetails: '技術的な詳細を表示',
+   updateTitle: 'DeepSeek Harness アップデート',
+   updateAvailable: '新しいバージョンがあります: {version}',
++  linuxUpdateInstaller: '{file} をダウンロードしてインストールしてください。',
+   updateDetail: 'ダウンロードが完了したら、アップデートをインストールしてアプリを再起動できます。',
+   installAndRestart: 'インストールして再起動',
+   later: '後で',
+@@ -755,6 +758,7 @@ export const es = {
+   updateTechnicalDetails: 'Ver detalles técnicos',
+   updateTitle: 'Actualización DeepSeek Harness',
+   updateAvailable: 'Nueva versión disponible: {version}',
++  linuxUpdateInstaller: 'Descarga e instala {file}.',
+   updateDetail: 'Una vez que se completa la descarga, puede instalar la actualización y reiniciar la aplicación.',
+   installAndRestart: 'Instalar y reiniciar',
+   later: 'Más tarde',
+@@ -953,6 +957,7 @@ export const fr = {
+   updateTechnicalDetails: 'Voir les détails techniques',
+   updateTitle: 'Mise à jour DeepSeek Harness',
+   updateAvailable: 'Nouvelle version disponible : {version}',
++  linuxUpdateInstaller: 'Téléchargez et installez {file}.',
+   updateDetail: "Une fois le téléchargement terminé, vous pouvez installer la mise à jour et redémarrer l'application.",
+   installAndRestart: 'Installer et redémarrer',
+   later: 'Plus tard',
+@@ -1151,6 +1156,7 @@ export const de = {
+   updateTechnicalDetails: 'Technische Details anzeigen',
+   updateTitle: 'DeepSeek Harness-Update',
+   updateAvailable: 'Neue Version verfügbar: {version}',
++  linuxUpdateInstaller: '{file} herunterladen und installieren.',
+   updateDetail: 'Sobald der Download abgeschlossen ist, können Sie das Update installieren und die App neu starten.',
+   installAndRestart: 'Installieren und neu starten',
+   later: 'Später',
+@@ -1349,6 +1355,7 @@ export const ru = {
+   updateTechnicalDetails: 'Посмотреть технические подробности',
+   updateTitle: 'DeepSeek Harness Обновление',
+   updateAvailable: 'Доступна новая версия: {version}.',
++  linuxUpdateInstaller: 'Скачайте и установите {file}.',
+   updateDetail: 'После завершения загрузки вы можете установить обновление и перезапустить приложение.',
+   installAndRestart: 'Установить и перезапустить',
+   later: 'Позже',
+@@ -1547,6 +1554,7 @@ export const pt = {
+   updateTechnicalDetails: 'Ver detalhes técnicos',
+   updateTitle: 'DeepSeek Harness Atualização',
+   updateAvailable: 'Nova versão disponível: {version}',
++  linuxUpdateInstaller: 'Baixe e instale {file}.',
+   updateDetail: 'Assim que o download for concluído, você pode instalar a atualização e reiniciar o aplicativo.',
+   installAndRestart: 'Instalar e reiniciar',
+   later: 'Mais tarde',
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index c8746cb8..2b5ae8be 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -17,6 +17,7 @@ import {
+   dialog,
+   ipcMain,
+   Menu,
++  net,
+   powerMonitor,
+   nativeImage,
+   nativeTheme,
+@@ -71,6 +72,7 @@ import { DesktopUpdateOverlays } from './update-overlay.ts'
+ import { DesktopQuitConfirmation } from './quit-confirmation.ts'
+ import { DesktopTray } from './tray.ts'
+ import { DesktopBackgroundNotice } from './background-notice.ts'
++import { checkLinuxReleaseUpdate, type LinuxReleaseUpdate } from './linux-release-update.ts'
+ 
+ const linuxProductName = process.platform === 'linux' && app.isPackaged ? process.env.DSH_DESKTOP_LINUX_CLIENT_TITLE : undefined
+ const usesCustomCaption = process.platform === 'win32' || process.platform === 'linux'
+@@ -722,13 +724,18 @@ async function main(): Promise<void> {
+   }
+ 
+   const manifest: unknown = JSON.parse(await readFile(join(app.getAppPath(), 'package.json'), 'utf8'))
++  const linuxCommunityBuild = !development && process.platform === 'linux'
++    && typeof manifest === 'object' && manifest !== null
++    && 'dshDesktopAppId' in manifest && manifest.dshDesktopAppId === 'io.github.leisteins.dshlinux'
+   const packagedChannel = desktopUpdateChannel(manifest)
+   const channelSettings = new DesktopUpdateSettings(app.getPath('userData'), packagedChannel)
+-  const initialChannel = await channelSettings.load()
+-  channelState = { channel: initialChannel.kind === 'ready' ? initialChannel.channel : null,
+-    packagedChannel, changing: false,
+-    ...(initialChannel.kind === 'error' ? { error: configurationFailure(initialChannel.error) } : {}) }
+-  const updateChannel = initialChannel.kind === 'ready' ? initialChannel.channel : packagedChannel
++  const initialChannel = linuxCommunityBuild ? undefined : await channelSettings.load()
++  if (initialChannel !== undefined) {
++    channelState = { channel: initialChannel.kind === 'ready' ? initialChannel.channel : null,
++      packagedChannel, changing: false,
++      ...(initialChannel.kind === 'error' ? { error: configurationFailure(initialChannel.error) } : {}) }
++  }
++  const updateChannel = initialChannel?.kind === 'ready' ? initialChannel.channel : packagedChannel
+   const updates = new DesktopUpdateCoordinator(
+     publishUpdate,
+     async () => {
+@@ -784,12 +791,12 @@ async function main(): Promise<void> {
+       }
+       return true
+     },
+-    undefined, undefined, undefined,
++    undefined, linuxCommunityBuild ? () => false : undefined, undefined,
+     (success, reason) => { void track('desktop_upgrade_download_result', { is_success: success, ...reason === undefined ? {} : { error_reason: reason } }) },
+     updateChannel,
+   )
+ 
+-  if (initialChannel.kind === 'error') updates.suspendConfiguration(initialChannel.error.path)
++  if (initialChannel?.kind === 'error') updates.suspendConfiguration(initialChannel.error.path)
+   const publishChannel = (state: DesktopChannelState): DesktopChannelState => {
+     channelState = state
+     for (const window of BrowserWindow.getAllWindows()) {
+@@ -1029,10 +1036,91 @@ async function main(): Promise<void> {
+     return configurationPrompt
+   }
+ 
++  const showLinuxUpdateResult = async (parent: BrowserWindow, result: LinuxReleaseUpdate): Promise<void> => {
++    const { messages } = locale
++    const version = formatDesktopMessage(messages.updateCurrentDetail, { version: app.getVersion() })
++    if (result.kind === 'current') {
++      await ordinaryMessageBox({ title: messages.updateCheckTitle, message: messages.updateCurrent, detail: version }, parent)
++      return
++    }
++    if (result.kind !== 'available') {
++      await ordinaryMessageBox({
++        type: 'error', title: messages.updateCheckFailedTitle,
++        message: result.kind === 'network-error' ? messages.updateCheckNetworkFailed
++          : result.kind === 'incomplete' ? messages.mandatoryNoRelease : messages.updateCheckFailed,
++      }, parent)
++      return
++    }
++    const detail = result.installer === undefined ? version
++      : `${version}\n\n${formatDesktopMessage(messages.linuxUpdateInstaller, { file: result.installer })}`
++    const choice = await ordinaryMessageBox({
++      title: messages.updateCheckTitle,
++      message: formatDesktopMessage(messages.updateAvailable, { version: result.version }),
++      detail, buttons: [messages.mandatoryViewDownload, messages.updateClose], cancelId: 1,
++    }, parent)
++    if (choice.response === 0 && !isQuitting()) {
++      try {
++        await shell.openExternal(result.url)
++      } catch (error) {
++        console.error('Linux update check: could not open the release page', error)
++        await ordinaryMessageBox({ type: 'error', title: messages.updateCheckTitle,
++          message: messages.mandatoryViewPageFailed, detail: result.url }, parent)
++      }
++    }
++  }
++
++  const openLinuxUpdatePrompt = async (): Promise<void> => {
++    const parent = currentDialogWindow()
++    if (isQuitting() || parent === undefined || parent.isDestroyed()) return
++    const controller = new AbortController()
++    ordinaryDialogs.add(controller)
++    const { messages } = locale
++    const progress = updateDialog.show(parent, {
++      title: messages.updateCheckTitle, message: messages.updateChecking,
++      buttons: [messages.cancel], cancelId: 0, signal: controller.signal,
++    }).then(() => { controller.abort() }, (error: unknown) => {
++      console.error('Linux update check: could not show progress', error)
++      controller.abort()
++    })
++    let result: LinuxReleaseUpdate
++    try {
++      const appUpdateConfig = await readFile(join(process.resourcesPath, 'app-update.yml'), 'utf8')
++      const packageType = await readFile(join(process.resourcesPath, 'dsh-linux-package-type'), 'utf8')
++        .then(type => type.trim(), (error: NodeJS.ErrnoException) => {
++          if (error.code !== 'ENOENT') console.warn('Linux update check: could not read installer format', error)
++          return undefined
++        })
++      controller.signal.throwIfAborted()
++      result = await checkLinuxReleaseUpdate(appUpdateConfig, app.getVersion(), packageType, (url, init) => net.fetch(url, init), controller.signal)
++      if (controller.signal.aborted) return
++    } catch (error) {
++      if (controller.signal.aborted) return
++      throw error
++    } finally {
++      controller.abort()
++      ordinaryDialogs.delete(controller)
++      await progress
++    }
++    if (!isQuitting() && !parent.isDestroyed()) await showLinuxUpdateResult(parent, result)
++  }
++
+   let promptOperation: Promise<void> | undefined
+   let policyAuthenticationQueued = false
+   /** Present check results only while their captured channel revision remains current. */
+   const openUpdatePrompt = (manual = false): Promise<void> => {
++    if (linuxCommunityBuild) {
++      if (promptOperation !== undefined) {
++        updateDialog.focus()
++        return promptOperation
++      }
++      promptOperation = openLinuxUpdatePrompt()
++        .catch((error: unknown) => {
++          console.error('Linux update check failed', error)
++          return showUpdateFailure({ phase: 'error', failedOperation: 'check' })
++        })
++        .finally(() => { promptOperation = undefined })
++      return promptOperation
++    }
+     if (channelState?.error !== undefined) {
+       return showConfigurationError()
+     }
+@@ -1173,7 +1261,7 @@ async function main(): Promise<void> {
+ 
+   const automaticCheck = (): void => {
+     if (!quitting) void mandatoryPolicy?.check('foreground-or-resume').catch((error: unknown) => { console.error(error) })
+-    if (!quitting) void updateSchedule.check().catch((error: unknown) => { console.error(error) })
++    if (!quitting && !linuxCommunityBuild) void updateSchedule.check().catch((error: unknown) => { console.error(error) })
+   }
+   powerMonitor.on('resume', automaticCheck)
+   app.on('will-quit', () => {
+@@ -1276,7 +1364,8 @@ async function main(): Promise<void> {
+     // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
+     try {
+       tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
+-        open: () => { focusPrimaryWindow() }, quit: () => { app.quit() } })
++        open: () => { focusPrimaryWindow() }, quit: () => { app.quit() },
++        ...(linuxCommunityBuild ? { checkForUpdates: () => { focusPrimaryWindow(); void openUpdatePrompt(true) } } : {}) })
+     } catch (error) { console.warn('desktop tray: unavailable', error) }
+   }
+   const backgroundNotice = process.platform === 'win32'
+@@ -1547,6 +1636,7 @@ async function main(): Promise<void> {
+   const finishQuit = (): void => {
+     quitting = true
+     shuttingDown = true
++    if (linuxCommunityBuild) for (const controller of ordinaryDialogs) controller.abort()
+     updateJournal?.action('quit-requested')
+     quitConfirmation.dispose()
+     backgroundNotice?.dispose()
+diff --git a/apps/desktop/src/preload-app.ts b/apps/desktop/src/preload-app.ts
+index 61b4678e..f031658b 100644
+--- a/apps/desktop/src/preload-app.ts
++++ b/apps/desktop/src/preload-app.ts
+@@ -67,7 +67,7 @@ function createProductApi(): DshDesktopProductApi {
+       },
+     },
+     updates: {
+-      channels: {
++      ...(process.platform === 'linux' ? {} : { channels: {
+         get: () => ipcRenderer.invoke(DESKTOP_IPC.updatesChannelGet) as Promise<DesktopChannelState>,
+         set: channel => ipcRenderer.invoke(DESKTOP_IPC.updatesChannelSet, channel) as Promise<DesktopChannelChangeResult>,
+         subscribe(listener) {
+@@ -75,7 +75,7 @@ function createProductApi(): DshDesktopProductApi {
+           ipcRenderer.on(DESKTOP_IPC.updatesChannelChanged, handle)
+           return () => { ipcRenderer.off(DESKTOP_IPC.updatesChannelChanged, handle) }
+         },
+-      },
++      } }),
+       status: () => ipcRenderer.invoke(DESKTOP_IPC.updatesStatus) as Promise<DesktopUpdatePresentation>,
+       open: () => ipcRenderer.invoke(DESKTOP_IPC.updatesOpen) as Promise<void>,
+       subscribe(listener) {
+diff --git a/apps/desktop/src/tray.ts b/apps/desktop/src/tray.ts
+index 63d8cc56..e96233fc 100644
+--- a/apps/desktop/src/tray.ts
++++ b/apps/desktop/src/tray.ts
+@@ -3,13 +3,15 @@
+ import { Menu, nativeImage, Tray } from 'electron'
+ import type { DesktopLocale } from './locale.ts'
+ 
+-/** Main-process actions the tray triggers; both run the same paths as the window and application menu. */
++/** Main-process actions shared with the window and application menu. */
+ export interface DesktopTrayOptions {
+   /** Windows multi-size tray ICO or Linux application PNG. */
+   readonly iconPath: string
+   readonly locale: () => DesktopLocale
+   /** Show and focus the primary window. */
+   readonly open: () => void
++  /** Check the community release list when the tray supplies an update entry. */
++  readonly checkForUpdates?: () => void
+   /** Request quit through the same confirmation as every other quit entry. */
+   readonly quit: () => void
+ }
+@@ -36,6 +38,9 @@ export class DesktopTray {
+     tray.setToolTip(messages.aboutProduct)
+     tray.setContextMenu(Menu.buildFromTemplate([
+       { label: messages.openApplication, click: () => { this.options.open() } },
++      ...(this.options.checkForUpdates === undefined ? [] : [
++        { label: messages.checkUpdatesMenu, click: this.options.checkForUpdates },
++      ]),
+       { type: 'separator' },
+       { label: messages.quitApplication, click: () => { this.options.quit() } },
+     ]))
+diff --git a/apps/desktop/tests/linux-release-update.spec.ts b/apps/desktop/tests/linux-release-update.spec.ts
+new file mode 100644
+index 00000000..4ca458ae
+--- /dev/null
++++ b/apps/desktop/tests/linux-release-update.spec.ts
+@@ -0,0 +1,79 @@
++import { expect, it, vi } from 'vitest'
++import { checkLinuxReleaseUpdate } from '../src/linux-release-update.ts'
++
++const repository = 'test-owner/test-linux-build'
++const updateConfig = 'provider: github\nowner: test-owner\nrepo: test-linux-build\n'
++const signal = new AbortController().signal
++
++function release(version: string, draft = false) {
++  return {
++    draft, tag_name: `dsh-v${version}`,
++    prerelease: version.includes('-'),
++    assets: [
++      `dsh-linux-${version}-amd64.deb`, `dsh-linux-${version}-x86_64.rpm`,
++      `dsh-linux-${version}-x86_64.AppImage`, 'SHA256SUMS',
++    ].map(name => ({ name, state: 'uploaded', size: 1 })),
++  }
++}
++
++it.each([
++  ['deb', 'amd64.deb'], ['rpm', 'x86_64.rpm'], ['appimage', 'x86_64.AppImage'],
++])('recommends the %s package for the newest complete preview across pages', async (type, suffix) => {
++  const incomplete = release('0.2.4-rc.1')
++  incomplete.assets[0]!.state = 'open'
++  const request = vi.fn()
++    .mockResolvedValueOnce(Response.json([release('0.2.3-alpha.9'), release('1.0.0', true), incomplete], {
++      headers: { Link: '<https://unexpected.example/page>; rel="next"' },
++    }))
++    .mockResolvedValueOnce(Response.json([release('0.2.3-alpha.10'), release('0.2.2-rc.6')]))
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', type, request, signal)).resolves.toEqual({
++    kind: 'available',
++    version: '0.2.3-alpha.10',
++    url: `https://github.com/${repository}/releases/tag/dsh-v0.2.3-alpha.10`,
++    installer: `dsh-linux-0.2.3-alpha.10-${suffix}`,
++  })
++  expect(request.mock.calls.map(([url]) => url)).toEqual([1, 2].map(page =>
++    `https://api.github.com/repos/${repository}/releases?per_page=100&page=${page}`))
++  expect(request.mock.calls[0]?.[1]).toMatchObject({ credentials: 'omit', redirect: 'error' })
++})
++
++it('accepts a full release after its preview and opens the page for an unpacked build', async () => {
++  const request = async () => Response.json([release('0.2.3-rc.1'), release('0.2.3')])
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-rc.1', undefined, request, signal)).resolves.toEqual({
++    kind: 'available', version: '0.2.3', url: `https://github.com/${repository}/releases/tag/dsh-v0.2.3`,
++  })
++})
++
++it('treats the same version and later-published older branches as current', async () => {
++  const request = async () => Response.json([release('0.2.2-rc.6'), release('0.2.3-alpha.2'), release('0.2.3-01')])
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', request, signal)).resolves.toEqual({ kind: 'current' })
++})
++
++it('reports a higher release with a missing checksum as incomplete', async () => {
++  const incomplete = release('0.2.3-alpha.10')
++  incomplete.assets = incomplete.assets.filter(asset => asset.name !== 'SHA256SUMS')
++  const request = async () => Response.json([incomplete, release('0.2.3-alpha.2')])
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', request, signal)).resolves.toEqual({ kind: 'incomplete' })
++})
++
++it('reports rate limiting or an invalid response instead of claiming to be current', async () => {
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', async () => new Response(null, { status: 403 }), signal))
++    .resolves.toEqual({ kind: 'service-error' })
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', async () => Response.json({ releases: [] }), signal))
++    .resolves.toEqual({ kind: 'service-error' })
++})
++
++it('distinguishes a network failure from user cancellation', async () => {
++  const request = vi.fn().mockRejectedValue(new Error('offline'))
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', request, signal)).resolves.toEqual({ kind: 'network-error' })
++  const controller = new AbortController()
++  controller.abort()
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', request, controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
++})
++
++it('rejects an invalid packaged update source before requesting a release', async () => {
++  const request = vi.fn()
++  await expect(checkLinuxReleaseUpdate(updateConfig + 'host: example.net\n', '0.2.3-alpha.2', 'deb', request, signal))
++    .rejects.toThrow('Linux app-update.yml must configure a public GitHub repository')
++  expect(request).not.toHaveBeenCalled()
++})
+diff --git a/apps/desktop/tests/main-startup.spec.ts b/apps/desktop/tests/main-startup.spec.ts
+index 8a0435c1..a15f3e3f 100644
+--- a/apps/desktop/tests/main-startup.spec.ts
++++ b/apps/desktop/tests/main-startup.spec.ts
+@@ -60,6 +60,7 @@ const harness = await vi.hoisted(async () => {
+   let quitCompleted = deferred()
+   let policyBlocked = deferred()
+   let embeddedPolicy: unknown
++  let linuxPackageType: 'deb' | undefined
+   let closeWindowsOnQuit = false
+   let updateState: DesktopUpdateState = { phase: 'idle' }
+   let platformDisposeDeferred: ReturnType<typeof deferred> | undefined
+@@ -191,7 +192,7 @@ const harness = await vi.hoisted(async () => {
+     whenReady: () => Promise.resolve(),
+     getLocale: (): string => 'en-US',
+     getPreferredSystemLanguages: () => ['en-US'],
+-    getVersion: () => '1.0.0',
++    getVersion: (): string => '1.0.0',
+     getAppPath: (): string => 'desktop-test-app',
+     setAppLogsPath: vi.fn(),
+     getPath: vi.fn<(name: string) => string>(),
+@@ -258,6 +259,7 @@ const harness = await vi.hoisted(async () => {
+     set publishUpdate(value: (state: DesktopUpdateState) => DesktopUpdateState) { publishUpdate = value },
+     dialog: { showOpenDialog: vi.fn(), showErrorBox: vi.fn(), showMessageBox: vi.fn() },
+     openExternal: vi.fn(async () => {}),
++    fetchLinuxReleases: vi.fn<() => Promise<Response>>(),
+     showItemInFolder: vi.fn(),
+     protocolHandle: vi.fn<(scheme: string, handler: (request: Request) => Response | Promise<Response>) => void>(),
+     applyRelease: vi.fn(() => { preparing.resolve(); return prepared.promise }),
+@@ -271,6 +273,8 @@ const harness = await vi.hoisted(async () => {
+     get policyBlocked() { return policyBlocked },
+     get embeddedPolicy() { return embeddedPolicy },
+     set embeddedPolicy(value: unknown) { embeddedPolicy = value },
++    get linuxPackageType() { return linuxPackageType },
++    set linuxPackageType(value: 'deb' | undefined) { linuxPackageType = value },
+     nextNavigation() { navigated = deferred(); return navigated.promise },
+     nextHostStart() { hostStarted = deferred(); return hostStarted.promise },
+     deferPlatformDispose() { platformDisposeDeferred = deferred(); return platformDisposeDeferred },
+@@ -303,6 +307,7 @@ const harness = await vi.hoisted(async () => {
+       navigated = deferred(); dialogShown = deferred(); quitCompleted = deferred()
+       policyBlocked = deferred()
+       embeddedPolicy = undefined
++      linuxPackageType = undefined
+       fileDrag.install.mockReset()
+       fileDrag.dispose.mockReset().mockResolvedValue(undefined)
+       platformDisposeDeferred = undefined
+@@ -326,6 +331,7 @@ vi.mock('electron', () => ({
+   WebContentsView: harness.FakeView,
+   dialog: harness.dialog,
+   shell: { openExternal: harness.openExternal, showItemInFolder: harness.showItemInFolder },
++  net: { fetch: harness.fetchLinuxReleases },
+   nativeTheme: harness.nativeTheme,
+   ipcMain: {
+     on: harness.ipcOn,
+@@ -354,7 +360,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
+   const original = await importOriginal<typeof import('node:fs/promises')>()
+   return { ...original, readFile: vi.fn((path: Parameters<typeof original.readFile>[0], encoding?: 'utf8') => {
+     if (path === join('desktop-test-app', 'package.json')) {
+-      return Promise.resolve(JSON.stringify({ dshDesktopAppId: 'com.deepseek.dsh', dshMandatoryUpdatePolicy: harness.embeddedPolicy }))
++      return Promise.resolve(JSON.stringify({ dshDesktopAppId: harness.linuxPackageType === undefined ? 'com.deepseek.dsh' : 'io.github.leisteins.dshlinux',
++        dshMandatoryUpdatePolicy: harness.embeddedPolicy }))
++    }
++    if (path === join('desktop-test-resources', 'app-update.yml') && harness.linuxPackageType !== undefined) {
++      return Promise.resolve('provider: github\nowner: test-owner\nrepo: test-linux-build\n')
++    }
++    if (path === join('desktop-test-resources', 'dsh-linux-package-type') && harness.linuxPackageType !== undefined) {
++      return Promise.resolve(harness.linuxPackageType + '\n')
+     }
+     return encoding === undefined ? original.readFile(path) : original.readFile(path, encoding)
+   }) }
+@@ -1794,6 +1807,50 @@ describe('desktop main startup', () => {
+     return host
+   }
+ 
++  it('joins Linux tray, application menu, and IPC checks and opens the matching release only after confirmation', async () => {
++    vi.stubGlobal('process', { ...process, platform: 'linux' })
++    vi.spyOn(harness.app, 'getVersion').mockReturnValue('1.0.0-alpha.2')
++    harness.linuxPackageType = 'deb'
++    const host = await readyWorkspace()
++    const version = '1.0.0-alpha.10'
++    const installer = `dsh-linux-${version}-amd64.deb`
++    const assets = [installer, `dsh-linux-${version}-x86_64.rpm`, `dsh-linux-${version}-x86_64.AppImage`, 'SHA256SUMS']
++      .map(name => ({ name, state: 'uploaded', size: 1 }))
++    const response = Promise.withResolvers<Response>()
++    const confirmation = Promise.withResolvers<{ response: number }>()
++    const resultShown = Promise.withResolvers<void>()
++    harness.fetchLinuxReleases.mockReturnValueOnce(response.promise)
++    harness.dialog.showMessageBox.mockImplementation((options: MessageBoxOptions & { signal?: AbortSignal }) => {
++      if (options.message === en.updateChecking) {
++        return new Promise(resolve => options.signal!.addEventListener('abort', () => { resolve({ response: 0 }) }))
++      }
++      resultShown.resolve()
++      return confirmation.promise
++    })
++
++    const trayUpdate = harness.menu.mock.calls.flatMap(([items]) => items).find(item => item.label === en.checkUpdatesMenu)!
++    ;(trayUpdate as { click: () => void }).click()
++    const applicationUpdate = applicationMenuItems().find(item => item.label === en.checkUpdatesMenu)!
++    ;(applicationUpdate as { click: () => void }).click()
++    const ipcUpdate = invoke(DESKTOP_IPC.updatesOpen, 'app')
++    response.resolve(Response.json([{ tag_name: `dsh-v${version}`, draft: false, prerelease: true, assets }]))
++    await resultShown.promise
++    expect(harness.fetchLinuxReleases).toHaveBeenCalledOnce()
++    expect(harness.dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({
++      message: `New version available: ${version}`,
++      detail: `Current version: 1.0.0-alpha.2\n\nDownload and install ${installer}.`,
++      buttons: [en.mandatoryViewDownload, en.updateClose], cancelId: 1,
++    }))
++    expect(harness.openExternal).not.toHaveBeenCalled()
++    confirmation.resolve({ response: 0 })
++    await ipcUpdate
++    expect(harness.openExternal).toHaveBeenCalledExactlyOnceWith(`https://github.com/test-owner/test-linux-build/releases/tag/dsh-v${version}`)
++    expect(host.stop).not.toHaveBeenCalled()
++    expect(harness.updateCheck).not.toHaveBeenCalled()
++    expect(harness.updateDownload).not.toHaveBeenCalled()
++    expect(harness.updateInstall).not.toHaveBeenCalled()
++  })
++
+   it('hides the workspace before intentional Host shutdown can look like reconnection', async () => {
+     const host = await readyWorkspace()
+     const window = harness.windows[0]!
+diff --git a/apps/desktop/tests/preload-app.spec.ts b/apps/desktop/tests/preload-app.spec.ts
+index fa3d2386..45060324 100644
+--- a/apps/desktop/tests/preload-app.spec.ts
++++ b/apps/desktop/tests/preload-app.spec.ts
+@@ -295,14 +295,16 @@ void imageProtocolBack
+ 
+ 
+ it('exposes channel choices and scoped subscriptions without exposing updater objects', async () => {
++  vi.stubGlobal('process', { ...process, platform: 'win32' })
+   vi.stubGlobal('location', new URL('dsh-app://app/index.html'))
+   await import('../src/preload-app.ts')
+   const api = electron.contextBridge.exposeInMainWorld.mock.calls.find(([name]) => name === 'dshDesktop')?.[1] as DshDesktopProductApi
+-  await api.updates.channels.get()
+-  await api.updates.channels.set('stable')
++  const channels = api.updates.channels!
++  await channels.get()
++  await channels.set('stable')
+   expect(electron.ipcRenderer.invoke.mock.calls).toEqual([[DESKTOP_IPC.updatesChannelGet], [DESKTOP_IPC.updatesChannelSet, 'stable']])
+   const listener = vi.fn()
+-  const dispose = api.updates.channels.subscribe(listener)
++  const dispose = channels.subscribe(listener)
+   const handler = electron.ipcRenderer.on.mock.calls.find(([channel]) => channel === DESKTOP_IPC.updatesChannelChanged)?.[1] as
+     (event: unknown, state: unknown) => void
+   const state = { channel: 'stable', packagedChannel: 'nightly', changing: false }
+@@ -311,3 +313,13 @@ it('exposes channel choices and scoped subscriptions without exposing updater ob
+   dispose()
+   expect(electron.ipcRenderer.off).toHaveBeenCalledWith(DESKTOP_IPC.updatesChannelChanged, handler)
+ })
++
++it('offers the community check on Linux without exposing the upstream channel controls', async () => {
++  vi.stubGlobal('process', { ...process, platform: 'linux' })
++  vi.stubGlobal('location', new URL('dsh-app://app/index.html'))
++  await import('../src/preload-app.ts')
++  const api = electron.contextBridge.exposeInMainWorld.mock.calls.find(([name]) => name === 'dshDesktop')?.[1] as DshDesktopProductApi
++  expect(api.updates.channels).toBeUndefined()
++  await api.updates.open()
++  expect(electron.ipcRenderer.invoke).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC.updatesOpen)
++})

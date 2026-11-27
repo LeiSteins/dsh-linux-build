@@ -124,5 +124,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           RELEASE_PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+          UPSTREAM_REVISION: ${{ needs.resolve.outputs.revision }}
           OVERWRITE: ${{ inputs.overwrite }}
         run: scripts/publish-release.sh dist

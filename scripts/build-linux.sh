@@ -54,6 +54,7 @@ patches=(
   0002-linux-tray.patch
   0003-linux-caption.patch
   0004-linux-branding.patch
+  0005-linux-release-update.patch
 )
 for patch in "${patches[@]}"; do
   if ! GIT_INDEX_FILE="$patch_index" git apply --cached "$repo/patches/$patch"; then
@@ -80,9 +81,11 @@ pnpm exec vitest run \
   apps/desktop/tests/tray.spec.ts \
   apps/desktop/tests/caption-controls.client.spec.ts \
   apps/desktop/tests/preload-menu.client.spec.ts \
+  apps/desktop/tests/preload-app.spec.ts \
   apps/desktop/tests/preload-platform.client.spec.ts \
   apps/desktop/tests/preload-windows.client.spec.ts \
   apps/desktop/tests/update-dialog.spec.ts \
+  apps/desktop/tests/linux-release-update.spec.ts \
   apps/desktop/tests/update-overlay.spec.ts \
   apps/desktop/tests/welcome-window.spec.ts \
   apps/desktop/tests/pack-local-packages.spec.ts \
@@ -128,9 +131,23 @@ ELECTRON_RUN_AS_NODE=1 "$stage/linux-unpacked/dsh-linux" -e '
   const { version: packagedVersion } = JSON.parse(require("node:fs").readFileSync(archive + "/package.json", "utf8"));
   require("node:assert/strict").equal(packagedVersion, version);
 ' "$stage/linux-unpacked/resources/app.asar" "$version"
+pnpm --dir apps/desktop exec node --input-type=module - "$stage/linux-unpacked/resources/app-update.yml" <<'JS'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { load } from 'js-yaml'
+
+const update = load(readFileSync(process.argv[2], 'utf8'))
+assert.equal(update.provider, 'github')
+assert.equal(`${update.owner}/${update.repo}`, process.env.GITHUB_REPOSITORY ?? 'LeiSteins/dsh-linux-build')
+assert.equal(update.publishAutoUpdate, false)
+assert.ok(update.updaterCacheDirName)
+JS
 pnpm exec tsx apps/desktop/scripts/smoke-linux.mts "$stage/linux-unpacked/resources" 2>&1 |
   sed -uE 's/([?&]token=)[^[:space:]&]+/\1[redacted]/g'
-"${builder[@]}" --linux deb rpm AppImage --prepackaged "$stage/linux-unpacked"
+for target in deb rpm AppImage; do
+  printf '%s\n' "${target,,}" > "$stage/linux-unpacked/resources/dsh-linux-package-type"
+  "${builder[@]}" --linux "$target" --prepackaged "$stage/linux-unpacked"
+done
 
 mapfile -t packages < <(package_names "$version")
 for file in "${packages[@]}"; do
@@ -150,6 +167,10 @@ mkdir "$stage/appimage-test"
   "$stage/${packages[2]}" --appimage-extract dsh-linux.desktop >/dev/null
   grep -Fx "Name=$DSH_DESKTOP_LINUX_CLIENT_TITLE" squashfs-root/dsh-linux.desktop
   grep -Fx 'Icon=dsh-linux' squashfs-root/dsh-linux.desktop
+  "$stage/${packages[2]}" --appimage-extract resources/dsh-linux-package-type >/dev/null
+  grep -Fx appimage squashfs-root/resources/dsh-linux-package-type
+  "$stage/${packages[2]}" --appimage-extract resources/app-update.yml >/dev/null
+  cmp "$stage/linux-unpacked/resources/app-update.yml" squashfs-root/resources/app-update.yml
   "$stage/${packages[2]}" --appimage-extract "${launcher_icon#/}" >/dev/null
   test -s "squashfs-root$launcher_icon"
 )
@@ -160,13 +181,3 @@ for file in "${packages[@]}"; do
 done
 cd -- "$output"
 sha256sum -- "${packages[@]}" > SHA256SUMS
-{
-  printf 'Upstream repository: https://github.com/%s\n' "$UPSTREAM_REPOSITORY"
-  printf 'Application: %s\nVersion: %s\n' "$DSH_DESKTOP_LINUX_CLIENT_TITLE" "$version"
-  printf 'Upstream tag: %s\nUpstream commit: %s\n' "$tag" "$revision"
-  printf 'Packaging commit: %s\n' "$(git -C "$repo" rev-parse HEAD)"
-  if [[ -n ${GITHUB_RUN_ID:-} ]]; then
-    printf 'Workflow run: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-  fi
-  printf 'Architecture: x86_64\nBuild: unsigned community packages\n'
-} > BUILD-INFO.txt
