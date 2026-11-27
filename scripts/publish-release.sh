@@ -19,7 +19,7 @@ mapfile -t assets < <(asset_names "$version")
 for file in "${assets[@]}"; do
   test -s "$file"
 done
-# Require the checksum file to describe exactly the three installers being published.
+# Require the checksum file to describe exactly the installers being published.
 sha256sum -- "${packages[@]}" | cmp - SHA256SUMS
 
 verify_uploaded_assets() {
@@ -43,6 +43,7 @@ notes=$(cat <<NOTES
 
 - Debian / Ubuntu：下载 \`.deb\`，运行 \`sudo apt install ./文件名.deb\`。
 - Fedora：下载 \`.rpm\`，运行 \`sudo dnf install ./文件名.rpm\`。
+- Arch Linux：下载 \`.pkg.tar.zst\`，运行 \`sudo pacman -U ./文件名.pkg.tar.zst\`。
 - 便携运行：下载 \`.AppImage\`，赋予执行权限后运行。FUSE 不可用时可加 \`--appimage-extract-and-run\`。
 
 安装包未签名，请使用 \`SHA256SUMS\` 验证文件完整性。下载新版本安装包即可手动更新。
@@ -64,11 +65,11 @@ if [[ $(jq -r '.draft' <<< "$existing") == false ]]; then
     gh release upload "$tag" "${assets[@]}" --repo "$repo" --clobber
     release_id=$(jq -er '.id' <<< "$existing")
   else
-    missing=$(missing_asset_names "$existing" "$expected_assets")
-    if [[ -z "$missing" ]]; then
+    if published_release_has_assets "$existing" "$version"; then
       echo "$tag 已发布。新构建保留在 Actions Artifacts。"
       exit 0
     fi
+    missing=$(missing_asset_names "$existing" "$expected_assets")
     mapfile -t missing_files <<< "$missing"
     uploaded=$(jq -c '.assets' <<< "$existing")
     mapfile -t retained_files < <(jq -r --argjson expected "$expected_assets" '

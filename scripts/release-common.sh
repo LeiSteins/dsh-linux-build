@@ -11,9 +11,29 @@ version_from_tag() {
   printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
-package_names() {
+pacman_version() {
+  local version=$1 prerelease
+  if [[ "$version" == *-* ]]; then
+    prerelease=${version#*-}
+    # libalpm sorts an attached letter suffix before the unadorned version.
+    printf '%spre.%s\n' "${version%%-*}" "${prerelease//-/_}"
+  else
+    printf '%s\n' "$version"
+  fi
+}
+
+pacman_package_name() {
+  printf 'dsh-linux-%s-x86_64.pkg.tar.zst\n' "$1"
+}
+
+legacy_package_names() {
   local version=$1
   printf '%s\n' "dsh-linux-$version-amd64.deb" "dsh-linux-$version-x86_64.rpm" "dsh-linux-$version-x86_64.AppImage"
+}
+
+package_names() {
+  legacy_package_names "$1"
+  pacman_package_name "$1"
 }
 
 asset_names() {
@@ -38,4 +58,15 @@ missing_asset_names() {
 
 release_has_assets() {
   [[ -z $(missing_asset_names "$1" "$2") ]]
+}
+
+published_release_has_assets() {
+  local release=$1 version=$2 names
+  # Releases published before Arch support already have a complete checksum manifest.
+  if jq -e --arg pacman "$(pacman_package_name "$version")" 'any(.assets[]?; .name == $pacman)' <<< "$release" >/dev/null; then
+    names=$(asset_names "$version" | jq -Rn '[inputs]')
+  else
+    names=$({ legacy_package_names "$version"; printf '%s\n' SHA256SUMS; } | jq -Rn '[inputs]')
+  fi
+  release_has_assets "$release" "$names"
 }

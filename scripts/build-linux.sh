@@ -39,6 +39,7 @@ fi
 
 export DSH_DESKTOP_LINUX_CLIENT_TITLE='Deepseek Harness'
 export DSH_DESKTOP_BUILD_VERSION="$version"
+export DSH_DESKTOP_PACMAN_VERSION="$(pacman_version "$version")"
 export DSH_DESKTOP_APP_ID=io.github.leisteins.dshlinux
 export DSH_DESKTOP_TARGET_PLATFORM=linux DSH_DESKTOP_TARGET_ARCH=x64 DSH_DESKTOP_UNSIGNED=1
 export DSH_DESKTOP_BUILD_COMMIT="$revision" DSH_DESKTOP_BUILD_DIRTY=1 DSH_TELEMETRY_DISABLED=1
@@ -55,6 +56,7 @@ patches=(
   0003-linux-caption.patch
   0004-linux-branding.patch
   0005-linux-release-update.patch
+  0006-linux-welcome-window.patch
 )
 for patch in "${patches[@]}"; do
   if ! GIT_INDEX_FILE="$patch_index" git apply --cached "$repo/patches/$patch"; then
@@ -144,7 +146,10 @@ assert.ok(update.updaterCacheDirName)
 JS
 pnpm exec tsx apps/desktop/scripts/smoke-linux.mts "$stage/linux-unpacked/resources" 2>&1 |
   sed -uE 's/([?&]token=)[^[:space:]&]+/\1[redacted]/g'
-for target in deb rpm AppImage; do
+package_type="$stage/linux-unpacked/resources/package-type"
+for target in deb rpm AppImage pacman; do
+  # The native targets write this file into the shared Electron tree.
+  if [[ -e "$package_type" ]]; then unlink "$package_type"; fi
   printf '%s\n' "${target,,}" > "$stage/linux-unpacked/resources/dsh-linux-package-type"
   "${builder[@]}" --linux "$target" --prepackaged "$stage/linux-unpacked"
 done
@@ -161,6 +166,13 @@ mkdir "$stage/rpmdb"
 launcher_icon=/usr/share/icons/hicolor/256x256/apps/dsh-linux.png
 dpkg-deb --fsys-tarfile "$stage/${packages[0]}" | tar -t | grep -Fx ".$launcher_icon"
 rpm --dbpath "$stage/rpmdb" -qpl "$stage/${packages[1]}" | grep -Fx "$launcher_icon"
+pacman_package="$stage/$(pacman_package_name "$version")"
+pkginfo=$(bsdtar -xOf "$pacman_package" .PKGINFO)
+grep -Fx 'pkgname = dsh-linux' <<< "$pkginfo"
+grep -Fx "pkgver = $DSH_DESKTOP_PACMAN_VERSION-1" <<< "$pkginfo"
+grep -Fx 'arch = x86_64' <<< "$pkginfo"
+bsdtar -tf "$pacman_package" | grep -Fx "${launcher_icon#/}"
+bsdtar -xOf "$pacman_package" "opt/$DSH_DESKTOP_LINUX_CLIENT_TITLE/resources/dsh-linux-package-type" | grep -Fx pacman
 mkdir "$stage/appimage-test"
 (
   cd "$stage/appimage-test"

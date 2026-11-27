@@ -13,21 +13,34 @@ index 911681ca..f6b59cd6 100644
      subscribe(listener: (state: DesktopUpdatePresentation) => void): () => void
 diff --git a/apps/desktop/src/linux-release-update.ts b/apps/desktop/src/linux-release-update.ts
 new file mode 100644
-index 00000000..5724c19b
+index 00000000..1ce2f201
 --- /dev/null
 +++ b/apps/desktop/src/linux-release-update.ts
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,199 @@
 +/** Read the public DSH Linux release list for user-initiated update checks. */
 +
 +import { gt, valid } from 'semver'
 +import { load } from 'js-yaml'
 +
-+const installerSuffixes = { deb: 'amd64.deb', rpm: 'x86_64.rpm', appimage: 'x86_64.AppImage' } as const
++const installerSuffixes = {
++  deb: 'amd64.deb',
++  rpm: 'x86_64.rpm',
++  appimage: 'x86_64.AppImage',
++  pacman: 'x86_64.pkg.tar.zst',
++} as const
++
++type ReleaseUnavailable = { readonly kind: 'current' | 'incomplete' | 'network-error' | 'service-error' }
 +
 +/** Result of reading community releases, including preview releases. */
 +export type LinuxReleaseUpdate =
-+  | { readonly kind: 'available'; readonly version: string; readonly url: string; readonly installer?: string }
-+  | { readonly kind: 'current' | 'incomplete' | 'network-error' | 'service-error' }
++  | {
++    readonly kind: 'available'
++    readonly version: string
++    readonly url: string
++    readonly installer?: string
++    readonly mirrorUrl?: string
++  }
++  | ReleaseUnavailable
 +
 +function isRecord(value: unknown): value is Record<string, unknown> {
 +  return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -51,15 +64,95 @@ index 00000000..5724c19b
 +  return `dsh-linux-${version}-${suffix}`
 +}
 +
-+function hasReleaseAssets(assets: unknown, version: string): boolean {
-+  if (!Array.isArray(assets)) return false
-+  const uploaded = new Set<string>()
++function uploadedAssets(assets: unknown): Map<string, number> {
++  const uploaded = new Map<string, number>()
++  if (!Array.isArray(assets)) return uploaded
 +  for (const asset of assets) {
 +    if (isRecord(asset) && typeof asset.name === 'string' && asset.state === 'uploaded'
-+      && typeof asset.size === 'number' && asset.size > 0) uploaded.add(asset.name)
++      && typeof asset.size === 'number' && asset.size > 0) uploaded.set(asset.name, asset.size)
 +  }
++  return uploaded
++}
++
++function hasReleaseAssets(uploaded: Map<string, number>, version: string, packageType: string | undefined): boolean {
++  // Older releases can still update installers that existed before Arch support.
 +  return uploaded.has('SHA256SUMS')
-+    && Object.values(installerSuffixes).every(suffix => uploaded.has(installerName(version, suffix)))
++    && Object.entries(installerSuffixes).every(([type, suffix]) =>
++      (type === 'pacman' && packageType !== 'pacman') || uploaded.has(installerName(version, suffix)))
++}
++
++function mirrorPrefix(value: string | undefined): string | undefined {
++  if (!value?.trim()) return undefined
++  const url = URL.parse(value.trim())
++  if (url === null || url.protocol !== 'https:' || url.username || url.password
++    || url.href.includes('?') || url.href.includes('#')) {
++    console.warn('Linux update check: ignoring invalid DSH_LINUX_UPDATE_MIRROR')
++    return undefined
++  }
++  return url.href.replace(/\/*$/u, '/')
++}
++
++type ReleaseRequest = (url: string, init: RequestInit) => Promise<Response>
++type ReleaseCandidate = { readonly kind: 'available'; readonly version: string; readonly installerSize: number | undefined }
++
++async function findLinuxRelease(
++  releasesApi: string,
++  currentVersion: string,
++  packageType: string | undefined,
++  suffix: string | undefined,
++  request: ReleaseRequest,
++  signal: AbortSignal,
++  timeout: number,
++): Promise<ReleaseCandidate | ReleaseUnavailable> {
++  const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeout)])
++  let best: ReleaseCandidate | undefined
++  let incomplete = false
++  for (let page = 1; ; page++) {
++    let response: Response
++    try {
++      response = await request(`${releasesApi}?per_page=100&page=${page}`, {
++        headers: { Accept: 'application/vnd.github+json' },
++        cache: 'no-store',
++        credentials: 'omit',
++        redirect: 'error',
++        signal: deadline,
++      })
++    } catch (error) {
++      signal.throwIfAborted()
++      console.warn('Linux update check: could not reach the release API', error)
++      return { kind: 'network-error' }
++    }
++    if (!response.ok) {
++      console.warn('Linux update check: release API returned HTTP', response.status)
++      return { kind: 'service-error' }
++    }
++    let releases: unknown
++    try {
++      releases = await response.json()
++    } catch (error) {
++      signal.throwIfAborted()
++      console.warn('Linux update check: could not read the release list', error)
++      return { kind: deadline.aborted ? 'network-error' : 'service-error' }
++    }
++    if (!Array.isArray(releases)) return { kind: 'service-error' }
++    for (const release of releases) {
++      if (!isRecord(release) || release.draft !== false || typeof release.tag_name !== 'string'
++        || !release.tag_name.startsWith('dsh-v')) continue
++      const version = release.tag_name.slice('dsh-v'.length)
++      if (valid(version) !== version || !gt(version, currentVersion)) continue
++      const assets = uploadedAssets(release.assets)
++      if (!hasReleaseAssets(assets, version, packageType)) {
++        incomplete = true
++      } else if (best === undefined || gt(version, best.version)) {
++        const installerSize = suffix === undefined ? undefined : assets.get(installerName(version, suffix))
++        best = { kind: 'available', version, installerSize }
++      }
++    }
++    // Follow pagination without trusting a response-supplied URL.
++    if (!/(?:^|,)\s*<[^>]+>;\s*rel="next"/u.test(response.headers.get('link') ?? '')) break
++  }
++  signal.throwIfAborted()
++  return best ?? { kind: incomplete ? 'incomplete' : 'current' }
 +}
 +
 +/**
@@ -69,71 +162,59 @@ index 00000000..5724c19b
 + * @param packageType - Installer format recorded by the Linux build.
 + * @param request - Main-process HTTPS transport.
 + * @param signal - Cancels the check when the prompt closes or the app quits.
-+ * @returns The release page and matching installer, or the reason an update is unavailable.
++ * @param mirror - Optional HTTPS proxy prefix for public GitHub URLs.
++ * @returns The matching installer or release page, or the reason an update is unavailable.
 + */
 +export async function checkLinuxReleaseUpdate(
 +  appUpdateConfig: string,
 +  currentVersion: string,
 +  packageType: string | undefined,
-+  request: (url: string, init: RequestInit) => Promise<Response>,
++  request: ReleaseRequest,
 +  signal: AbortSignal,
++  mirror?: string,
 +): Promise<LinuxReleaseUpdate> {
 +  signal.throwIfAborted()
 +  if (valid(currentVersion) !== currentVersion) return { kind: 'service-error' }
 +  const repository = githubRepository(appUpdateConfig)
 +  const releasesApi = `https://api.github.com/repos/${repository}/releases`
 +  const releasesPage = `https://github.com/${repository}/releases`
-+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(15_000)])
-+  let best: string | undefined
-+  let incomplete = false
-+  for (let page = 1; ; page++) {
-+    let response: Response
-+    try {
-+      response = await request(`${releasesApi}?per_page=100&page=${page}`, {
-+        headers: { Accept: 'application/vnd.github+json' },
-+        credentials: 'omit',
-+        redirect: 'error',
-+        signal: deadline,
-+      })
-+    } catch (error) {
-+      signal.throwIfAborted()
-+      console.warn('Linux update check: could not reach GitHub', error)
-+      return { kind: 'network-error' }
-+    }
-+    if (!response.ok) {
-+      console.warn('Linux update check: GitHub returned HTTP', response.status)
-+      return { kind: 'service-error' }
-+    }
-+    let releases: unknown
-+    try {
-+      releases = await response.json()
-+    } catch (error) {
-+      signal.throwIfAborted()
-+      console.warn('Linux update check: could not read GitHub releases', error)
-+      return { kind: deadline.aborted ? 'network-error' : 'service-error' }
-+    }
-+    if (!Array.isArray(releases)) return { kind: 'service-error' }
-+    for (const release of releases) {
-+      if (!isRecord(release) || release.draft !== false || typeof release.tag_name !== 'string'
-+        || !release.tag_name.startsWith('dsh-v')) continue
-+      const version = release.tag_name.slice('dsh-v'.length)
-+      if (valid(version) !== version || !gt(version, currentVersion)) continue
-+      if (!hasReleaseAssets(release.assets, version)) {
-+        incomplete = true
-+      } else if (best === undefined || gt(version, best)) {
-+        best = version
-+      }
-+    }
-+    // Follow pagination without trusting a response-supplied URL.
-+    if (!/(?:^|,)\s*<[^>]+>;\s*rel="next"/u.test(response.headers.get('link') ?? '')) break
-+  }
-+  signal.throwIfAborted()
-+  if (best === undefined) return { kind: incomplete ? 'incomplete' : 'current' }
++  const prefix = mirrorPrefix(mirror)
 +  const suffix = Object.entries(installerSuffixes).find(([type]) => type === packageType)?.[1]
-+  return {
-+    kind: 'available', version: best, url: `${releasesPage}/tag/dsh-v${best}`,
-+    ...(suffix === undefined ? {} : { installer: installerName(best, suffix) }),
++  let release = prefix === undefined ? undefined
++    : await findLinuxRelease(prefix + releasesApi, currentVersion, packageType, suffix, request, signal, 6_000)
++  signal.throwIfAborted()
++  if (release === undefined || release.kind === 'network-error' || release.kind === 'service-error') {
++    release = await findLinuxRelease(releasesApi, currentVersion, packageType, suffix, request, signal, 15_000)
 +  }
++  if (release.kind !== 'available') return release
++  const { version, installerSize } = release
++  const tag = `dsh-v${version}`
++  if (suffix === undefined) return { kind: 'available', version, url: `${releasesPage}/tag/${tag}` }
++
++  const installer = installerName(version, suffix)
++  const url = `${releasesPage}/download/${tag}/${installer}`
++  const official = { kind: 'available', version, installer, url } as const
++  if (prefix === undefined || installerSize === undefined) return official
++
++  const mirrorUrl = prefix + url
++  try {
++    const response = await request(mirrorUrl, {
++      method: 'HEAD',
++      cache: 'no-store',
++      credentials: 'omit',
++      redirect: 'error',
++      signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
++    })
++    signal.throwIfAborted()
++    if (response.status === 200 && Number(response.headers.get('content-length')) === installerSize
++      && !response.headers.get('content-type')?.startsWith('text/html')) {
++      return { ...official, mirrorUrl }
++    }
++  } catch (error) {
++    signal.throwIfAborted()
++    console.warn('Linux update check: could not reach the installer mirror', error)
++  }
++  return official
 +}
 diff --git a/apps/desktop/src/locale.ts b/apps/desktop/src/locale.ts
 index 6ec83036..e19e1f97 100644
@@ -204,7 +285,7 @@ index 6ec83036..e19e1f97 100644
    installAndRestart: 'Instalar e reiniciar',
    later: 'Mais tarde',
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index c8746cb8..2b5ae8be 100644
+index c8746cb8..def908cf 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
 @@ -17,6 +17,7 @@ import {
@@ -262,7 +343,7 @@ index c8746cb8..2b5ae8be 100644
    const publishChannel = (state: DesktopChannelState): DesktopChannelState => {
      channelState = state
      for (const window of BrowserWindow.getAllWindows()) {
-@@ -1029,10 +1036,91 @@ async function main(): Promise<void> {
+@@ -1029,10 +1036,99 @@ async function main(): Promise<void> {
      return configurationPrompt
    }
  
@@ -283,19 +364,24 @@ index c8746cb8..2b5ae8be 100644
 +    }
 +    const detail = result.installer === undefined ? version
 +      : `${version}\n\n${formatDesktopMessage(messages.linuxUpdateInstaller, { file: result.installer })}`
++    const open = result.installer === undefined ? messages.mandatoryViewDownload : messages.updateDownload
++    const buttons = result.mirrorUrl === undefined ? [open, messages.updateClose] : [open, 'GitHub', messages.updateClose]
 +    const choice = await ordinaryMessageBox({
 +      title: messages.updateCheckTitle,
 +      message: formatDesktopMessage(messages.updateAvailable, { version: result.version }),
-+      detail, buttons: [messages.mandatoryViewDownload, messages.updateClose], cancelId: 1,
++      detail, buttons, cancelId: buttons.length - 1,
 +    }, parent)
-+    if (choice.response === 0 && !isQuitting()) {
-+      try {
++    if (choice.response === buttons.length - 1 || isQuitting()) return
++    try {
++      if (choice.response === 0 && result.mirrorUrl !== undefined) {
++        await shell.openExternal(result.mirrorUrl).catch(() => shell.openExternal(result.url))
++      } else {
 +        await shell.openExternal(result.url)
-+      } catch (error) {
-+        console.error('Linux update check: could not open the release page', error)
-+        await ordinaryMessageBox({ type: 'error', title: messages.updateCheckTitle,
-+          message: messages.mandatoryViewPageFailed, detail: result.url }, parent)
 +      }
++    } catch (error) {
++      console.error('Linux update check: could not open the download link', error)
++      await ordinaryMessageBox({ type: 'error', title: messages.updateCheckTitle,
++        message: messages.mandatoryViewPageFailed, detail: result.url }, parent)
 +    }
 +  }
 +
@@ -321,7 +407,10 @@ index c8746cb8..2b5ae8be 100644
 +          return undefined
 +        })
 +      controller.signal.throwIfAborted()
-+      result = await checkLinuxReleaseUpdate(appUpdateConfig, app.getVersion(), packageType, (url, init) => net.fetch(url, init), controller.signal)
++      result = await checkLinuxReleaseUpdate(
++        appUpdateConfig, app.getVersion(), packageType, (url, init) => net.fetch(url, init),
++        controller.signal, process.env.DSH_LINUX_UPDATE_MIRROR,
++      )
 +      if (controller.signal.aborted) return
 +    } catch (error) {
 +      if (controller.signal.aborted) return
@@ -354,7 +443,7 @@ index c8746cb8..2b5ae8be 100644
      if (channelState?.error !== undefined) {
        return showConfigurationError()
      }
-@@ -1173,7 +1261,7 @@ async function main(): Promise<void> {
+@@ -1173,7 +1269,7 @@ async function main(): Promise<void> {
  
    const automaticCheck = (): void => {
      if (!quitting) void mandatoryPolicy?.check('foreground-or-resume').catch((error: unknown) => { console.error(error) })
@@ -363,17 +452,7 @@ index c8746cb8..2b5ae8be 100644
    }
    powerMonitor.on('resume', automaticCheck)
    app.on('will-quit', () => {
-@@ -1276,7 +1364,8 @@ async function main(): Promise<void> {
-     // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
-     try {
-       tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
--        open: () => { focusPrimaryWindow() }, quit: () => { app.quit() } })
-+        open: () => { focusPrimaryWindow() }, quit: () => { app.quit() },
-+        ...(linuxCommunityBuild ? { checkForUpdates: () => { focusPrimaryWindow(); void openUpdatePrompt(true) } } : {}) })
-     } catch (error) { console.warn('desktop tray: unavailable', error) }
-   }
-   const backgroundNotice = process.platform === 'win32'
-@@ -1547,6 +1636,7 @@ async function main(): Promise<void> {
+@@ -1547,6 +1643,7 @@ async function main(): Promise<void> {
    const finishQuit = (): void => {
      quitting = true
      shuttingDown = true
@@ -403,49 +482,24 @@ index 61b4678e..f031658b 100644
        status: () => ipcRenderer.invoke(DESKTOP_IPC.updatesStatus) as Promise<DesktopUpdatePresentation>,
        open: () => ipcRenderer.invoke(DESKTOP_IPC.updatesOpen) as Promise<void>,
        subscribe(listener) {
-diff --git a/apps/desktop/src/tray.ts b/apps/desktop/src/tray.ts
-index 63d8cc56..e96233fc 100644
---- a/apps/desktop/src/tray.ts
-+++ b/apps/desktop/src/tray.ts
-@@ -3,13 +3,15 @@
- import { Menu, nativeImage, Tray } from 'electron'
- import type { DesktopLocale } from './locale.ts'
- 
--/** Main-process actions the tray triggers; both run the same paths as the window and application menu. */
-+/** Main-process actions shared with the window and application menu. */
- export interface DesktopTrayOptions {
-   /** Windows multi-size tray ICO or Linux application PNG. */
-   readonly iconPath: string
-   readonly locale: () => DesktopLocale
-   /** Show and focus the primary window. */
-   readonly open: () => void
-+  /** Check the community release list when the tray supplies an update entry. */
-+  readonly checkForUpdates?: () => void
-   /** Request quit through the same confirmation as every other quit entry. */
-   readonly quit: () => void
- }
-@@ -36,6 +38,9 @@ export class DesktopTray {
-     tray.setToolTip(messages.aboutProduct)
-     tray.setContextMenu(Menu.buildFromTemplate([
-       { label: messages.openApplication, click: () => { this.options.open() } },
-+      ...(this.options.checkForUpdates === undefined ? [] : [
-+        { label: messages.checkUpdatesMenu, click: this.options.checkForUpdates },
-+      ]),
-       { type: 'separator' },
-       { label: messages.quitApplication, click: () => { this.options.quit() } },
-     ]))
 diff --git a/apps/desktop/tests/linux-release-update.spec.ts b/apps/desktop/tests/linux-release-update.spec.ts
 new file mode 100644
-index 00000000..4ca458ae
+index 00000000..2334dcac
 --- /dev/null
 +++ b/apps/desktop/tests/linux-release-update.spec.ts
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,148 @@
 +import { expect, it, vi } from 'vitest'
 +import { checkLinuxReleaseUpdate } from '../src/linux-release-update.ts'
 +
 +const repository = 'test-owner/test-linux-build'
 +const updateConfig = 'provider: github\nowner: test-owner\nrepo: test-linux-build\n'
 +const signal = new AbortController().signal
++const mirror = 'https://mirror.example/'
++const releasesApi = `https://api.github.com/repos/${repository}/releases?per_page=100&page=1`
++
++function downloadUrl(version: string, suffix: string): string {
++  return `https://github.com/${repository}/releases/download/dsh-v${version}/dsh-linux-${version}-${suffix}`
++}
 +
 +function release(version: string, draft = false) {
 +  return {
@@ -471,7 +525,7 @@ index 00000000..4ca458ae
 +  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', type, request, signal)).resolves.toEqual({
 +    kind: 'available',
 +    version: '0.2.3-alpha.10',
-+    url: `https://github.com/${repository}/releases/tag/dsh-v0.2.3-alpha.10`,
++    url: downloadUrl('0.2.3-alpha.10', suffix),
 +    installer: `dsh-linux-0.2.3-alpha.10-${suffix}`,
 +  })
 +  expect(request.mock.calls.map(([url]) => url)).toEqual([1, 2].map(page =>
@@ -498,6 +552,20 @@ index 00000000..4ca458ae
 +  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', request, signal)).resolves.toEqual({ kind: 'incomplete' })
 +})
 +
++it('requires and recommends the pacman installer for an Arch installation', async () => {
++  const newer = release('0.2.3-rc.1')
++  const arch = release('0.2.3-alpha.10')
++  const installer = 'dsh-linux-0.2.3-alpha.10-x86_64.pkg.tar.zst'
++  arch.assets.push({ name: installer, state: 'uploaded', size: 1 })
++  const request = async () => Response.json([newer, arch])
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'pacman', request, signal)).resolves.toEqual({
++    kind: 'available', version: '0.2.3-alpha.10', installer,
++    url: downloadUrl('0.2.3-alpha.10', 'x86_64.pkg.tar.zst'),
++  })
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'pacman',
++    async () => Response.json([newer]), signal)).resolves.toEqual({ kind: 'incomplete' })
++})
++
 +it('reports rate limiting or an invalid response instead of claiming to be current', async () => {
 +  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', async () => new Response(null, { status: 403 }), signal))
 +    .resolves.toEqual({ kind: 'service-error' })
@@ -519,8 +587,57 @@ index 00000000..4ca458ae
 +    .rejects.toThrow('Linux app-update.yml must configure a public GitHub repository')
 +  expect(request).not.toHaveBeenCalled()
 +})
++
++it('uses the configured HTTPS mirror for release metadata and the matching installer', async () => {
++  const version = '0.2.3-alpha.10'
++  const request = vi.fn()
++    .mockResolvedValueOnce(Response.json([release(version)]))
++    .mockResolvedValueOnce(new Response(null, { headers: { 'Content-Length': '1' } }))
++  const url = downloadUrl(version, 'amd64.deb')
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', request, signal, mirror.slice(0, -1)))
++    .resolves.toEqual({ kind: 'available', version, url, mirrorUrl: mirror + url, installer: `dsh-linux-${version}-amd64.deb` })
++  expect(request).toHaveBeenCalledTimes(2)
++  expect(request).toHaveBeenNthCalledWith(1, mirror + releasesApi, expect.objectContaining({ credentials: 'omit' }))
++  expect(request).toHaveBeenNthCalledWith(2, mirror + url, expect.objectContaining({ method: 'HEAD', credentials: 'omit' }))
++})
++
++it('restarts the release lookup on GitHub after a mirror failure and uses GitHub if the mirror asset differs', async () => {
++  const version = '0.2.3-alpha.10'
++  const url = downloadUrl(version, 'x86_64.AppImage')
++  const request = vi.fn()
++    .mockResolvedValueOnce(Response.json([release('0.3.0')], { headers: { Link: '<ignored>; rel="next"' } }))
++    .mockResolvedValueOnce(new Response(null, { status: 502 }))
++    .mockResolvedValueOnce(Response.json([release(version)]))
++    .mockResolvedValueOnce(new Response(null, { headers: { 'Content-Length': '2' } }))
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'appimage', request, signal, mirror))
++    .resolves.toEqual({ kind: 'available', version, url, installer: `dsh-linux-${version}-x86_64.AppImage` })
++  expect(request.mock.calls.map(([requestUrl]) => requestUrl)).toEqual([
++    mirror + releasesApi, mirror + releasesApi.replace(/page=1$/u, 'page=2'), releasesApi, mirror + url,
++  ])
++})
++
++it.each(['http://mirror.example/', 'https://user:password@mirror.example/', 'https://mirror.example/?url='])(
++  'ignores a non-HTTPS or malformed proxy prefix (%s)',
++  async mirror => {
++    const request = vi.fn(async () => Response.json([]))
++    await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', request, signal, mirror))
++      .resolves.toEqual({ kind: 'current' })
++    expect(request).toHaveBeenCalledExactlyOnceWith(releasesApi, expect.objectContaining({ credentials: 'omit' }))
++  },
++)
++
++it('does not contact GitHub after cancelling a mirror request', async () => {
++  const controller = new AbortController()
++  const request = vi.fn(async () => {
++    controller.abort()
++    return new Response(null, { status: 503 })
++  })
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'deb', request, controller.signal, mirror))
++    .rejects.toMatchObject({ name: 'AbortError' })
++  expect(request).toHaveBeenCalledOnce()
++})
 diff --git a/apps/desktop/tests/main-startup.spec.ts b/apps/desktop/tests/main-startup.spec.ts
-index 8a0435c1..a15f3e3f 100644
+index 8a0435c1..fd03fdbe 100644
 --- a/apps/desktop/tests/main-startup.spec.ts
 +++ b/apps/desktop/tests/main-startup.spec.ts
 @@ -60,6 +60,7 @@ const harness = await vi.hoisted(async () => {
@@ -589,12 +706,19 @@ index 8a0435c1..a15f3e3f 100644
      }
      return encoding === undefined ? original.readFile(path) : original.readFile(path, encoding)
    }) }
-@@ -1794,6 +1807,50 @@ describe('desktop main startup', () => {
+@@ -1794,6 +1807,62 @@ describe('desktop main startup', () => {
      return host
    }
  
-+  it('joins Linux tray, application menu, and IPC checks and opens the matching release only after confirmation', async () => {
++  it.each([
++    { mirror: undefined, selected: 0, mirroredDownload: false },
++    { mirror: 'https://mirror.example/', selected: 0, mirroredDownload: true },
++    { mirror: 'https://mirror.example/', selected: 1, mirroredDownload: false },
++  ])('opens the selected Linux download after confirmation (mirror=$mirror, button=$selected)', async ({
++    mirror, selected, mirroredDownload,
++  }) => {
 +    vi.stubGlobal('process', { ...process, platform: 'linux' })
++    vi.stubEnv('DSH_LINUX_UPDATE_MIRROR', mirror)
 +    vi.spyOn(harness.app, 'getVersion').mockReturnValue('1.0.0-alpha.2')
 +    harness.linuxPackageType = 'deb'
 +    const host = await readyWorkspace()
@@ -606,6 +730,9 @@ index 8a0435c1..a15f3e3f 100644
 +    const confirmation = Promise.withResolvers<{ response: number }>()
 +    const resultShown = Promise.withResolvers<void>()
 +    harness.fetchLinuxReleases.mockReturnValueOnce(response.promise)
++    if (mirror !== undefined) {
++      harness.fetchLinuxReleases.mockResolvedValueOnce(new Response(null, { headers: { 'Content-Length': '1' } }))
++    }
 +    harness.dialog.showMessageBox.mockImplementation((options: MessageBoxOptions & { signal?: AbortSignal }) => {
 +      if (options.message === en.updateChecking) {
 +        return new Promise(resolve => options.signal!.addEventListener('abort', () => { resolve({ response: 0 }) }))
@@ -614,23 +741,25 @@ index 8a0435c1..a15f3e3f 100644
 +      return confirmation.promise
 +    })
 +
-+    const trayUpdate = harness.menu.mock.calls.flatMap(([items]) => items).find(item => item.label === en.checkUpdatesMenu)!
-+    ;(trayUpdate as { click: () => void }).click()
++    const trayMenu = harness.menu.mock.calls.map(([items]) => items).find(items => items.some(item => item.label === en.openApplication))
++    expect(trayMenu?.map(item => item.label ?? item.type)).toEqual([en.openApplication, 'separator', en.quitApplication])
 +    const applicationUpdate = applicationMenuItems().find(item => item.label === en.checkUpdatesMenu)!
 +    ;(applicationUpdate as { click: () => void }).click()
 +    const ipcUpdate = invoke(DESKTOP_IPC.updatesOpen, 'app')
 +    response.resolve(Response.json([{ tag_name: `dsh-v${version}`, draft: false, prerelease: true, assets }]))
 +    await resultShown.promise
-+    expect(harness.fetchLinuxReleases).toHaveBeenCalledOnce()
++    expect(harness.fetchLinuxReleases).toHaveBeenCalledTimes(mirror === undefined ? 1 : 2)
++    const buttons = mirror === undefined ? [en.updateDownload, en.updateClose] : [en.updateDownload, 'GitHub', en.updateClose]
 +    expect(harness.dialog.showMessageBox).toHaveBeenLastCalledWith(expect.objectContaining({
 +      message: `New version available: ${version}`,
 +      detail: `Current version: 1.0.0-alpha.2\n\nDownload and install ${installer}.`,
-+      buttons: [en.mandatoryViewDownload, en.updateClose], cancelId: 1,
++      buttons, cancelId: buttons.length - 1,
 +    }))
 +    expect(harness.openExternal).not.toHaveBeenCalled()
-+    confirmation.resolve({ response: 0 })
++    confirmation.resolve({ response: selected })
 +    await ipcUpdate
-+    expect(harness.openExternal).toHaveBeenCalledExactlyOnceWith(`https://github.com/test-owner/test-linux-build/releases/tag/dsh-v${version}`)
++    const url = `https://github.com/test-owner/test-linux-build/releases/download/dsh-v${version}/${installer}`
++    expect(harness.openExternal).toHaveBeenCalledExactlyOnceWith(mirroredDownload ? mirror + url : url)
 +    expect(host.stop).not.toHaveBeenCalled()
 +    expect(harness.updateCheck).not.toHaveBeenCalled()
 +    expect(harness.updateDownload).not.toHaveBeenCalled()

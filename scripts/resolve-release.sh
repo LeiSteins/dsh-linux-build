@@ -17,7 +17,6 @@ prerelease=$(jq -r '.prerelease' <<< "$release")
 revision=$(gh api "repos/$UPSTREAM_REPOSITORY/commits/$tag" --jq .sha)
 [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
 
-expected_assets=$(asset_names "$version" | jq -Rn '[inputs]')
 rebuild=${REBUILD:-false}
 [[ "$rebuild" == true || "$rebuild" == false ]] || { echo "无效的 rebuild 输入: $rebuild" >&2; exit 1; }
 overwrite=${OVERWRITE:-false}
@@ -25,7 +24,7 @@ overwrite=${OVERWRITE:-false}
 should_build=true
 if [[ "$rebuild" == false && "$overwrite" == false ]]; then
   existing=$(find_release "$GITHUB_REPOSITORY" "$tag")
-  if [[ $(jq -r '.draft' <<< "$existing") == false ]] && release_has_assets "$existing" "$expected_assets"; then
+  if [[ $(jq -r '.draft' <<< "$existing") == false ]] && published_release_has_assets "$existing" "$version"; then
     should_build=false
   fi
 fi

@@ -9,6 +9,8 @@ const { root, dsh, electron } = desktopTargetBuildPaths('linux-x64')
 const upstreamRoot = fileURLToPath(new URL('../../', import.meta.url))
 const productName = process.env.DSH_DESKTOP_LINUX_CLIENT_TITLE
 if (!productName) throw new Error('DSH_DESKTOP_LINUX_CLIENT_TITLE is required for Linux packaging')
+const pacmanVersion = process.env.DSH_DESKTOP_PACMAN_VERSION
+if (!pacmanVersion) throw new Error('DSH_DESKTOP_PACMAN_VERSION is required for Linux packaging')
 const executableName = 'dsh-linux'
 const maintainer = 'DSH Linux (Community) <noreply@github.com>'
 const homepage = 'https://github.com/deepseek-ai/deepseek-harness'
@@ -49,6 +51,16 @@ export default {
       'gtk3', 'libnotify', 'nss', 'libXScrnSaver', '(libXtst or libXtst6)',
       'xdg-utils', 'at-spi2-core', '(libuuid or libuuid1)', 'libsecret',
       'libgbm.so.1()(64bit)', 'libasound.so.2()(64bit)', 'libcups.so.2()(64bit)',
+    ],
+  },
+  pacman: {
+    packageName: executableName,
+    artifactName: 'dsh-linux-${version}-x86_64.pkg.tar.zst',
+    compression: 'zstd',
+    fpm: ['--version', pacmanVersion, '--iteration', '1'],
+    depends: [
+      'gtk3', 'libnotify', 'nss', 'libxss', 'libxtst', 'xdg-utils', 'at-spi2-core',
+      'util-linux-libs', 'libsecret', 'mesa', 'alsa-lib', 'libcups', 'libxkbcommon', 'ttf-liberation',
     ],
   },
 }

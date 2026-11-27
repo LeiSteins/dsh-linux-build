@@ -1,0 +1,259 @@
+diff --git a/apps/desktop/renderer/welcome.css b/apps/desktop/renderer/welcome.css
+index 3b4da2de..67e41724 100644
+--- a/apps/desktop/renderer/welcome.css
++++ b/apps/desktop/renderer/welcome.css
+@@ -37,6 +37,11 @@ body {
+   }
+ }
+ 
++/* Linux uses an opaque window instead of a native blur material. */
++html[data-platform='linux'] body {
++  --welcome-tint: var(--dsw-alias-bg-base);
++}
++
+ * {
+   box-sizing: border-box;
+ }
+diff --git a/apps/desktop/src/caption-controls.ts b/apps/desktop/src/caption-controls.ts
+index 8ccb7490..5e284d7a 100644
+--- a/apps/desktop/src/caption-controls.ts
++++ b/apps/desktop/src/caption-controls.ts
+@@ -21,15 +21,19 @@ function icon(name: keyof typeof ICONS): string {
+  * Mount the caption buttons at the window's top-right edge. The renderer owns
+  * their size and spacing so Linux matches the Windows caption; the main process
+  * still owns the window actions and the current maximized state.
++ * @param options - The window's IPC channel and whether the window can maximize.
+  */
+-export function installLinuxCaptionControls(): void {
++export function installLinuxCaptionControls(
++  { channel = DESKTOP_IPC.windowControl, maximizable = true }: { channel?: string; maximizable?: boolean } = {},
++): void {
+   if (process.platform !== 'linux') return
+ 
+   const host = document.createElement('div')
+   host.dataset.linuxCaptionControls = ''
+   const shadow = host.attachShadow({ mode: 'open' })
+-  const style = document.createElement('style')
+-  style.textContent = `
++  // The welcome document's CSP blocks inline style elements.
++  const style = new CSSStyleSheet()
++  style.replaceSync(`
+     :host {
+       position: fixed; top: 0; right: 0; z-index: 1100;
+       height: var(--dsh-windows-titlebar-height, 40px);
+@@ -43,15 +47,17 @@ export function installLinuxCaptionControls(): void {
+       background: transparent; color: var(--dsw-alias-label-secondary);
+       cursor: default; -webkit-app-region: no-drag;
+     }
+-    button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+-    button[data-close]:hover { background: #c42b1c; color: #ffffff; }
++    button:disabled { opacity: 0.4; }
++    button:enabled:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
++    button[data-close]:enabled:hover { background: #c42b1c; color: #ffffff; }
+     button:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: -2px; }
+     :host-context(html[data-input-modality='pointer']) button:focus-visible { outline-color: transparent; }
+     svg { display: block; }
+-  `
++  `)
++  shadow.adoptedStyleSheets = [style]
+ 
+   const send = (action: WindowAction): void => {
+-    void ipcRenderer.invoke(DESKTOP_IPC.windowControl, action).catch(() => {})
++    void ipcRenderer.invoke(channel, action).catch(() => {})
+   }
+   const createButton = (action: WindowAction): HTMLButtonElement => {
+     const button = document.createElement('button')
+@@ -62,6 +68,7 @@ export function installLinuxCaptionControls(): void {
+ 
+   const minimize = createButton('minimize')
+   const maximize = createButton('toggle-maximize')
++  maximize.disabled = !maximizable
+   const close = createButton('close')
+   close.dataset.close = ''
+   minimize.innerHTML = icon('minimize')
+@@ -84,11 +91,13 @@ export function installLinuxCaptionControls(): void {
+     updateLabels()
+   }
+ 
+-  ipcRenderer.on(DESKTOP_IPC.windowMaximized, (_event, next: unknown) => {
+-    if (typeof next === 'boolean') applyMaximized(next)
+-  })
++  if (maximizable) {
++    ipcRenderer.on(DESKTOP_IPC.windowMaximized, (_event, next: unknown) => {
++      if (typeof next === 'boolean') applyMaximized(next)
++    })
++  }
+ 
+-  shadow.append(style, minimize, maximize, close)
++  shadow.append(minimize, maximize, close)
+   let language: MutationObserver | undefined
+   const install = (): void => {
+     updateLabels()
+diff --git a/apps/desktop/src/preload-welcome.ts b/apps/desktop/src/preload-welcome.ts
+index 6748367e..7adb044a 100644
+--- a/apps/desktop/src/preload-welcome.ts
++++ b/apps/desktop/src/preload-welcome.ts
+@@ -2,7 +2,9 @@ import type { AccountView, SignInAttemptId } from '@deepseek-ai/dsh-deepseek-acc
+ /** Localized welcome copy and write-only credential actions. */
+ 
+ import { contextBridge, ipcRenderer } from 'electron'
++import { installLinuxCaptionControls } from './caption-controls.ts'
+ import { resolveDesktopLocale } from './locale.ts'
++import { markDocumentPlatform } from './preload-platform.ts'
+ import { WELCOME_IPC, type WelcomeApi, type WelcomeNotice, type WelcomeSaveResult } from './welcome-api.ts'
+ 
+ const prefix = '--dsh-welcome-locale='
+@@ -26,4 +28,6 @@ const api: WelcomeApi = {
+   saveApiKey: (value: string) => ipcRenderer.invoke(WELCOME_IPC.saveApiKey, value) as Promise<WelcomeSaveResult>,
+   skip: () => ipcRenderer.invoke(WELCOME_IPC.skip) as Promise<void>,
+ }
++markDocumentPlatform()
++installLinuxCaptionControls({ channel: WELCOME_IPC.windowControl, maximizable: false })
+ contextBridge.exposeInMainWorld('dshWelcome', api)
+diff --git a/apps/desktop/src/welcome-api.ts b/apps/desktop/src/welcome-api.ts
+index c693f385..a0af655b 100644
+--- a/apps/desktop/src/welcome-api.ts
++++ b/apps/desktop/src/welcome-api.ts
+@@ -15,6 +15,7 @@ export const WELCOME_IPC = {
+   copyLink: 'dsh-welcome:copy-link',
+   state: 'dsh-welcome:state',
+   takeNotice: 'dsh-welcome:take-notice',
++  windowControl: 'dsh-welcome:window-control',
+ } as const
+ 
+ /** Credential writes return a safe outcome without exposing Host diagnostics. */
+diff --git a/apps/desktop/src/welcome-window.ts b/apps/desktop/src/welcome-window.ts
+index 05b3f6c6..ac0a5371 100644
+--- a/apps/desktop/src/welcome-window.ts
++++ b/apps/desktop/src/welcome-window.ts
+@@ -36,6 +36,7 @@ export function welcomeWindowOptions(platform: NodeJS.Platform, locale: DesktopL
+       titleBarOverlay: { color: '#00000000', symbolColor: '#0F1115', height: 42 },
+       backgroundMaterial: 'acrylic',
+     } as const : {}),
++    ...(platform === 'linux' ? { titleBarStyle: 'hidden' } as const : {}),
+     webPreferences: {
+       preload: fileURLToPath(new URL('./preload-welcome.cjs', import.meta.url)),
+       additionalArguments: [`--dsh-welcome-locale=${locale.id}`],
+@@ -57,10 +58,12 @@ let disposeActiveHandlers: (() => void) | undefined
+  * @returns the visible window; a failed load destroys it before rejecting.
+  */
+ export async function openWelcomeWindow(locale: DesktopLocale, operations: WelcomeOperations): Promise<BrowserWindow> {
++  const linux = process.platform === 'linux'
+   const options = welcomeWindowOptions(process.platform, locale)
+-  const window = new BrowserWindow(process.platform === 'linux' && app.isPackaged
++  const window = new BrowserWindow(linux && app.isPackaged
+     ? { ...options, title: process.env.DSH_DESKTOP_LINUX_CLIENT_TITLE ?? locale.messages.welcomeTitle, icon: join(process.resourcesPath, 'icon.png') }
+     : options)
++  if (linux) window.removeMenu()
+   disposeActiveHandlers?.()
+   let active = true
+   const disposeHandlers = (): void => {
+@@ -72,6 +75,7 @@ export async function openWelcomeWindow(locale: DesktopLocale, operations: Welco
+     ]) {
+       ipcMain.removeHandler(channel)
+     }
++    if (linux) ipcMain.removeHandler(WELCOME_IPC.windowControl)
+     disposeActiveHandlers = undefined
+   }
+   disposeActiveHandlers = disposeHandlers
+@@ -80,6 +84,14 @@ export async function openWelcomeWindow(locale: DesktopLocale, operations: Welco
+       throw new Error('desktop welcome: rejected action from an unowned frame')
+     }
+   }
++  if (linux) {
++    ipcMain.handle(WELCOME_IPC.windowControl, (event, action: unknown) => {
++      assertSender(event)
++      if (action === 'minimize') window.minimize()
++      else if (action === 'close') window.close()
++      else throw new Error('desktop welcome: invalid window action')
++    })
++  }
+   ipcMain.handle(WELCOME_IPC.analyticsEnabled, (event) => {
+     assertSender(event)
+     return operations.analyticsEnabled()
+diff --git a/apps/desktop/tests/caption-controls.client.spec.ts b/apps/desktop/tests/caption-controls.client.spec.ts
+index 1772edc4..b794308c 100644
+--- a/apps/desktop/tests/caption-controls.client.spec.ts
++++ b/apps/desktop/tests/caption-controls.client.spec.ts
+@@ -39,3 +39,18 @@ it('invokes the window actions and swaps the maximize glyph', () => {
+   handler({}, false)
+   expect(buttons[1]!.innerHTML).toContain('width="9" height="9"')
+ })
++
++it('keeps all three buttons styled together and disables maximizing the fixed-size welcome window', () => {
++  vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
++  installLinuxCaptionControls({ channel: 'dsh-welcome:window-control', maximizable: false })
++  const host = document.querySelector<HTMLElement>('[data-linux-caption-controls]')!
++  const buttons = [...host.shadowRoot!.querySelectorAll('button')]
++  expect(buttons).toHaveLength(3)
++  expect(buttons[1]!.disabled).toBe(true)
++  for (const button of buttons) button.click()
++  expect(invoke.mock.calls).toEqual([
++    ['dsh-welcome:window-control', 'minimize'],
++    ['dsh-welcome:window-control', 'close'],
++  ])
++  expect(on).not.toHaveBeenCalledWith(DESKTOP_IPC.windowMaximized, expect.any(Function))
++})
+diff --git a/apps/desktop/tests/welcome-window.spec.ts b/apps/desktop/tests/welcome-window.spec.ts
+index 6d2807c4..66f5f95d 100644
+--- a/apps/desktop/tests/welcome-window.spec.ts
++++ b/apps/desktop/tests/welcome-window.spec.ts
+@@ -32,6 +32,9 @@ function createWindow() {
+     loadFile: vi.fn<(path: string) => Promise<undefined>>().mockResolvedValue(undefined),
+     isDestroyed: vi.fn().mockReturnValue(false),
+     destroy: vi.fn(),
++    removeMenu: vi.fn(),
++    minimize: vi.fn(),
++    close: vi.fn(),
+     show: vi.fn(),
+     once: vi.fn<(name: string, callback: () => void) => void>(),
+   }
+@@ -70,6 +73,7 @@ describe('desktop welcome window', () => {
+       expect(options.titleBarOverlay).toMatchObject({ height: 42 })
+     } else {
+       expect(options.backgroundColor).toBe('#FFFFFF')
++      expect(options.titleBarStyle).toBe('hidden')
+       expect(options.vibrancy).toBeUndefined()
+       expect(options.backgroundMaterial).toBeUndefined()
+     }
+@@ -92,6 +96,40 @@ describe('desktop welcome window', () => {
+     expect(window.show).toHaveBeenCalledOnce()
+   })
+ 
++  it.each(['linux', 'win32', 'darwin'] as const)('removes the inherited menu only from the Linux welcome window (%s)', async (platform) => {
++    const window = createWindow()
++    electron.create.mockReturnValue(window)
++    vi.stubGlobal('process', { ...process, platform })
++    try {
++      await openWelcomeWindow(resolveDesktopLocale('en'), operations)
++      expect(window.removeMenu).toHaveBeenCalledTimes(platform === 'linux' ? 1 : 0)
++    } finally {
++      vi.unstubAllGlobals()
++    }
++  })
++
++  it('routes Linux caption actions only from the welcome window and keeps its size fixed', async () => {
++    const window = createWindow()
++    electron.create.mockReturnValue(window)
++    vi.stubGlobal('process', { ...process, platform: 'linux' })
++    try {
++      await openWelcomeWindow(resolveDesktopLocale('en'), operations)
++      const control = electron.handlers.get(WELCOME_IPC.windowControl)!
++      const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame }
++      expect(() => control({ ...event, senderFrame: {} }, 'close')).toThrow('unowned frame')
++      expect(() => control(event, 'toggle-maximize')).toThrow('invalid window action')
++      await control(event, 'minimize')
++      await control(event, 'close')
++      expect(window.minimize).toHaveBeenCalledOnce()
++      expect(window.close).toHaveBeenCalledOnce()
++      const onClosed = window.once.mock.calls.find(([name]) => name === 'closed')![1]
++      onClosed()
++      expect(electron.handlers.has(WELCOME_IPC.windowControl)).toBe(false)
++    } finally {
++      vi.unstubAllGlobals()
++    }
++  })
++
+   it('destroys a window whose document fails to load', async () => {
+     const window = createWindow()
+     window.loadFile.mockRejectedValue(new Error('missing welcome document'))
