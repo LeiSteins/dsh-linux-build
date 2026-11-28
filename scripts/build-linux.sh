@@ -2,15 +2,18 @@
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/release-common.sh"
 
-if [[ $# != 3 ]]; then
-  echo '用法: scripts/build-linux.sh <上游源码目录> <上游发布标签> <产物目录>' >&2
+if [[ $# != 3 && $# != 4 ]]; then
+  echo '用法: scripts/build-linux.sh <上游源码目录> <上游发布标签> <产物目录> [发布修订号]' >&2
   exit 2
 fi
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 upstream=$(realpath -- "$1")
 tag=$2
-version=$(version_from_tag "$tag")
+upstream_version=$(version_from_tag "$tag")
+release_revision=${4-1}
+validate_release_revision "$release_revision"
+version=$upstream_version-$release_revision
 output=$(realpath -m -- "$3")
 if [[ "$output/" == "$upstream/"* ]]; then
   echo '产物目录需要位于上游检出目录之外。' >&2
@@ -18,15 +21,21 @@ if [[ "$output/" == "$upstream/"* ]]; then
 fi
 cd -- "$upstream"
 
-if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
-  echo '构建需要 Linux x86_64。' >&2
+package_arch=$(uname -m)
+case "$(uname -s):$package_arch" in
+  Linux:x86_64) arch=x64; deb_arch=amd64; unpacked=linux-unpacked ;;
+  Linux:aarch64) arch=arm64; deb_arch=arm64; unpacked=linux-arm64-unpacked ;;
+  *) echo '构建需要 Linux x86_64 或 aarch64。' >&2; exit 1 ;;
+esac
+if [[ ${DSH_DESKTOP_TARGET_ARCH:-$arch} != "$arch" ]]; then
+  echo "构建架构必须与宿主一致: $arch" >&2
   exit 1
 fi
 if [[ -n $(git status --porcelain) ]]; then
   echo '请使用干净的上游检出目录。构建会在该目录应用 Linux 补丁。' >&2
   exit 1
 fi
-if [[ $(jq -r .version package.json) != "$version" || $(jq -r .version apps/desktop/package.json) != "$version" ]]; then
+if [[ $(jq -r .version package.json) != "$upstream_version" || $(jq -r .version apps/desktop/package.json) != "$upstream_version" ]]; then
   echo "上游 package.json 的版本须与 $tag 一致。" >&2
   exit 1
 fi
@@ -38,10 +47,12 @@ if [[ -n ${UPSTREAM_REVISION:-} && "$revision" != "$UPSTREAM_REVISION" ]]; then
 fi
 
 export DSH_DESKTOP_LINUX_CLIENT_TITLE='Deepseek Harness'
-export DSH_DESKTOP_BUILD_VERSION="$version"
-export DSH_DESKTOP_PACMAN_VERSION="$(pacman_version "$version")"
+export DSH_DESKTOP_BUILD_VERSION="$upstream_version"
+export DSH_DESKTOP_LINUX_VERSION="$version" DSH_DESKTOP_LINUX_REVISION="$release_revision"
+export DSH_DESKTOP_NATIVE_VERSION="${upstream_version//-/\~}"
+export DSH_DESKTOP_PACMAN_VERSION="$(pacman_version "$upstream_version")"
 export DSH_DESKTOP_APP_ID=io.github.leisteins.dshlinux
-export DSH_DESKTOP_TARGET_PLATFORM=linux DSH_DESKTOP_TARGET_ARCH=x64 DSH_DESKTOP_UNSIGNED=1
+export DSH_DESKTOP_TARGET_PLATFORM=linux DSH_DESKTOP_TARGET_ARCH="$arch" DSH_DESKTOP_UNSIGNED=1
 export DSH_DESKTOP_BUILD_COMMIT="$revision" DSH_DESKTOP_BUILD_DIRTY=1 DSH_TELEMETRY_DISABLED=1
 
 stage=$(mktemp -d)
@@ -105,7 +116,7 @@ if ! jq -e --arg title "$DSH_DESKTOP_LINUX_CLIENT_TITLE" \
 fi
 
 # Follow upstream package-target.ts to prepare the local package closure and embedded runtimes.
-target_build="$upstream/apps/desktop/.desktop-build/targets/linux-x64"
+target_build="$upstream/apps/desktop/.desktop-build/targets/linux-$arch"
 packed="$target_build/packed"
 mkdir -p "$packed/dsh" "$packed/vendor" "$packed/landlock"
 pnpm exec tsx apps/desktop/scripts/pack-local-packages.ts --out "$packed/dsh" --concurrency 4
@@ -130,15 +141,19 @@ for (const size of [16, 32, 48, 64, 128, 256, 512]) {
 }
 JS
 
-builder=(pnpm --dir apps/desktop exec electron-builder --config electron-builder-linux.config.mjs --x64 --publish never "--config.directories.output=$stage")
+builder=(pnpm --dir apps/desktop exec electron-builder --config electron-builder-linux.config.mjs "--$arch" --publish never "--config.directories.output=$stage")
 "${builder[@]}" --linux --dir
-cmp apps/desktop/resources/icon-windows.png "$stage/linux-unpacked/resources/icon.png"
-ELECTRON_RUN_AS_NODE=1 "$stage/linux-unpacked/dsh-linux" -e '
-  const [archive, version] = process.argv.slice(1);
+unpacked="$stage/$unpacked"
+resources="$unpacked/resources"
+cmp apps/desktop/resources/icon-windows.png "$resources/icon.png"
+ELECTRON_RUN_AS_NODE=1 "$unpacked/dsh-linux" -e '
+  const [archive, version, arch] = process.argv.slice(1);
+  const assert = require("node:assert/strict");
   const { version: packagedVersion } = JSON.parse(require("node:fs").readFileSync(archive + "/package.json", "utf8"));
-  require("node:assert/strict").equal(packagedVersion, version);
-' "$stage/linux-unpacked/resources/app.asar" "$version"
-pnpm --dir apps/desktop exec node --input-type=module - "$stage/linux-unpacked/resources/app-update.yml" <<'JS'
+  assert.equal(packagedVersion, version);
+  assert.equal(process.arch, arch);
+' "$resources/app.asar" "$version" "$arch"
+pnpm --dir apps/desktop exec node --input-type=module - "$resources/app-update.yml" <<'JS'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { load } from 'js-yaml'
@@ -149,33 +164,33 @@ assert.equal(`${update.owner}/${update.repo}`, process.env.GITHUB_REPOSITORY ?? 
 assert.equal(update.publishAutoUpdate, false)
 assert.ok(update.updaterCacheDirName)
 JS
-pnpm exec tsx apps/desktop/scripts/smoke-linux.mts "$stage/linux-unpacked/resources" 2>&1 |
+pnpm exec tsx apps/desktop/scripts/smoke-linux.mts "$resources" 2>&1 |
   sed -uE 's/([?&]token=)[^[:space:]&]+/\1[redacted]/g'
-package_type="$stage/linux-unpacked/resources/package-type"
+package_type="$resources/package-type"
 for target in deb rpm AppImage pacman; do
   # The native targets write this file into the shared Electron tree.
   if [[ -e "$package_type" ]]; then unlink "$package_type"; fi
-  printf '%s\n' "${target,,}" > "$stage/linux-unpacked/resources/dsh-linux-package-type"
-  "${builder[@]}" --linux "$target" --prepackaged "$stage/linux-unpacked"
+  printf '%s\n' "${target,,}" > "$resources/dsh-linux-package-type"
+  "${builder[@]}" --linux "$target" --prepackaged "$unpacked"
 done
 
-mapfile -t packages < <(package_names "$version")
+mapfile -t packages < <(package_names "$version" "$package_arch")
 for file in "${packages[@]}"; do
   test -s "$stage/$file"
 done
-native_version=${version//-/\~}
-[[ $(dpkg-deb -f "$stage/${packages[0]}" Architecture) == amd64 ]]
+native_version=$DSH_DESKTOP_NATIVE_VERSION-$release_revision
+[[ $(dpkg-deb -f "$stage/${packages[0]}" Architecture) == "$deb_arch" ]]
 [[ $(dpkg-deb -f "$stage/${packages[0]}" Version) == "$native_version" ]]
 mkdir "$stage/rpmdb"
-[[ $(rpm --dbpath "$stage/rpmdb" -qp --queryformat '%{ARCH} %{VERSION}' "$stage/${packages[1]}") == "x86_64 $native_version" ]]
+[[ $(rpm --dbpath "$stage/rpmdb" -qp --queryformat '%{ARCH} %{VERSION}-%{RELEASE}' "$stage/${packages[1]}") == "$package_arch $native_version" ]]
 launcher_icon=/usr/share/icons/hicolor/256x256/apps/dsh-linux.png
 dpkg-deb --fsys-tarfile "$stage/${packages[0]}" | tar -t | grep -Fx ".$launcher_icon"
 rpm --dbpath "$stage/rpmdb" -qpl "$stage/${packages[1]}" | grep -Fx "$launcher_icon"
-pacman_package="$stage/$(pacman_package_name "$version")"
+pacman_package="$stage/${packages[3]}"
 pkginfo=$(bsdtar -xOf "$pacman_package" .PKGINFO)
 grep -Fx 'pkgname = dsh-linux' <<< "$pkginfo"
-grep -Fx "pkgver = $DSH_DESKTOP_PACMAN_VERSION-1" <<< "$pkginfo"
-grep -Fx 'arch = x86_64' <<< "$pkginfo"
+grep -Fx "pkgver = $DSH_DESKTOP_PACMAN_VERSION-$release_revision" <<< "$pkginfo"
+grep -Fx "arch = $package_arch" <<< "$pkginfo"
 bsdtar -tf "$pacman_package" | grep -Fx "${launcher_icon#/}"
 bsdtar -xOf "$pacman_package" "opt/$DSH_DESKTOP_LINUX_CLIENT_TITLE/resources/dsh-linux-package-type" | grep -Fx pacman
 mkdir "$stage/appimage-test"
@@ -187,7 +202,7 @@ mkdir "$stage/appimage-test"
   "$stage/${packages[2]}" --appimage-extract resources/dsh-linux-package-type >/dev/null
   grep -Fx appimage squashfs-root/resources/dsh-linux-package-type
   "$stage/${packages[2]}" --appimage-extract resources/app-update.yml >/dev/null
-  cmp "$stage/linux-unpacked/resources/app-update.yml" squashfs-root/resources/app-update.yml
+  cmp "$resources/app-update.yml" squashfs-root/resources/app-update.yml
   "$stage/${packages[2]}" --appimage-extract "${launcher_icon#/}" >/dev/null
   test -s "squashfs-root$launcher_icon"
 )

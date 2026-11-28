@@ -11,6 +11,13 @@ version_from_tag() {
   printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
+validate_release_revision() {
+  if [[ ! "$1" =~ ^[1-9][0-9]*$ ]]; then
+    echo "发布修订号须为正整数且不能带前导零: $1" >&2
+    return 1
+  fi
+}
+
 pacman_version() {
   local version=$1 prerelease
   if [[ "$version" == *-* ]]; then
@@ -22,28 +29,29 @@ pacman_version() {
   fi
 }
 
-pacman_package_name() {
-  printf 'dsh-linux-%s-x86_64.pkg.tar.zst\n' "$1"
-}
-
-legacy_package_names() {
-  local version=$1
-  printf '%s\n' "dsh-linux-$version-amd64.deb" "dsh-linux-$version-x86_64.rpm" "dsh-linux-$version-x86_64.AppImage"
-}
-
 package_names() {
-  legacy_package_names "$1"
-  pacman_package_name "$1"
+  local version=$1 arch=$2 deb_arch appimage_arch
+  case "$arch" in
+    x86_64) deb_arch=amd64; appimage_arch=x86_64 ;;
+    aarch64) deb_arch=arm64; appimage_arch=arm64 ;;
+    *) echo "不支持的 Linux 架构: $arch" >&2; return 1 ;;
+  esac
+  printf '%s\n' "dsh-linux-$version-$deb_arch.deb" "dsh-linux-$version-$arch.rpm" \
+    "dsh-linux-$version-$appimage_arch.AppImage" "dsh-linux-$version-$arch.pkg.tar.zst"
+}
+
+release_package_names() {
+  package_names "$1" x86_64
+  package_names "$1" aarch64
 }
 
 asset_names() {
-  package_names "$1"
+  release_package_names "$1"
   printf '%s\n' SHA256SUMS
 }
 
 find_release() {
-  gh api --paginate --slurp "repos/$1/releases?per_page=100" |
-    jq -c --arg tag "$2" '[.[][] | select(.tag_name == $tag)][0] // {}'
+  jq -c --arg tag "$1" '[.[][] | select(.tag_name == $tag)][0] // {}'
 }
 
 missing_asset_names() {
@@ -51,22 +59,14 @@ missing_asset_names() {
   jq -r --argjson assets "$names" '
     .assets as $uploaded |
     $assets[] as $name |
-    select(any($uploaded[]; .name == $name and .state == "uploaded" and .size > 0) | not) |
+    select(any($uploaded[]?; .name == $name and .state == "uploaded" and .size > 0) | not) |
     $name
   ' <<< "$release"
 }
 
 release_has_assets() {
-  [[ -z $(missing_asset_names "$1" "$2") ]]
-}
-
-published_release_has_assets() {
-  local release=$1 version=$2 names
-  # Releases published before Arch support already have a complete checksum manifest.
-  if jq -e --arg pacman "$(pacman_package_name "$version")" 'any(.assets[]?; .name == $pacman)' <<< "$release" >/dev/null; then
-    names=$(asset_names "$version" | jq -Rn '[inputs]')
-  else
-    names=$({ legacy_package_names "$version"; printf '%s\n' SHA256SUMS; } | jq -Rn '[inputs]')
-  fi
-  release_has_assets "$release" "$names"
+  local names missing
+  names=$(asset_names "$2" | jq -Rn '[inputs]') || return
+  missing=$(missing_asset_names "$1" "$names") || return
+  [[ -z "$missing" ]]
 }

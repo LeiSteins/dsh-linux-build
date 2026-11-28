@@ -7,6 +7,10 @@ on:
         description: 上游 Release 标签，留空使用最新发布版本
         type: string
         required: false
+      release_revision:
+        description: Linux 发布修订号，留空沿用该上游版本的最高修订号
+        type: string
+        required: false
       publish:
         description: 发布到 GitHub Releases
         type: boolean
@@ -35,7 +39,8 @@ jobs:
     name: Select upstream release
     runs-on: ubuntu-24.04
     outputs:
-      tag: ${{ steps.release.outputs.tag }}
+      upstream_tag: ${{ steps.release.outputs.upstream_tag }}
+      release_revision: ${{ steps.release.outputs.release_revision }}
       version: ${{ steps.release.outputs.version }}
       revision: ${{ steps.release.outputs.revision }}
       should_build: ${{ steps.release.outputs.should_build }}
@@ -49,16 +54,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.upstream_tag }}
+          RELEASE_REVISION: ${{ inputs.release_revision }}
           REBUILD: ${{ inputs.rebuild }}
           OVERWRITE: ${{ inputs.overwrite }}
         run: scripts/resolve-release.sh
 
   build:
-    name: Build Linux x86_64 packages
+    name: Build Linux ${{ matrix.package_arch }} packages
     needs: resolve
     if: needs.resolve.outputs.should_build == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            package_arch: x86_64
+            runner: ubuntu-24.04
+            timeout: 90
+          - arch: arm64
+            package_arch: aarch64
+            runner: ubuntu-24.04-arm
+            timeout: 180
     steps:
       - name: Check out packaging repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -91,13 +109,15 @@ jobs:
             libnss3 libxss1 libxtst6 libnotify4 libsecret-1-0 xdg-utils fonts-liberation
       - name: Build and verify DEB, RPM, AppImage and Arch packages
         env:
-          UPSTREAM_TAG: ${{ needs.resolve.outputs.tag }}
+          DSH_DESKTOP_TARGET_ARCH: ${{ matrix.arch }}
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
+          RELEASE_REVISION: ${{ needs.resolve.outputs.release_revision }}
           UPSTREAM_REVISION: ${{ needs.resolve.outputs.revision }}
-        run: scripts/build-linux.sh upstream "$UPSTREAM_TAG" dist
+        run: scripts/build-linux.sh upstream "$UPSTREAM_TAG" dist "$RELEASE_REVISION"
       - name: Upload verified packages
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: dsh-linux-${{ needs.resolve.outputs.version }}-x86_64
+          name: dsh-linux-${{ needs.resolve.outputs.version }}-${{ matrix.package_arch }}
           path: dist/
           if-no-files-found: error
           compression-level: 0
@@ -119,15 +139,28 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+      - name: Download verified packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         if: needs.build.result == 'success'
         with:
-          name: dsh-linux-${{ needs.resolve.outputs.version }}-x86_64
-          path: dist
+          pattern: dsh-linux-${{ needs.resolve.outputs.version }}-*
+          path: artifacts
+      - name: Assemble the release from both architectures
+        if: needs.build.result == 'success'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          mkdir dist
+          for arch in x86_64 aarch64; do
+            dir="artifacts/dsh-linux-$VERSION-$arch"
+            cat "$dir/SHA256SUMS" >> dist/SHA256SUMS
+            mv -- "$dir"/dsh-linux-* dist/
+          done
       - name: Publish or promote the release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
+          RELEASE_REVISION: ${{ needs.resolve.outputs.release_revision }}
           UPSTREAM_REVISION: ${{ needs.resolve.outputs.revision }}
           OVERWRITE: ${{ inputs.overwrite }}
           ARTIFACT_DIR: ${{ needs.build.result == 'success' && 'dist' || '' }}

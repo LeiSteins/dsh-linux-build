@@ -2,13 +2,17 @@
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/release-common.sh"
 
-tag=${RELEASE_TAG:?}
-version=$(version_from_tag "$tag")
+upstream_tag=${UPSTREAM_TAG:?}
+upstream_version=$(version_from_tag "$upstream_tag")
+release_revision=${RELEASE_REVISION:?}
+validate_release_revision "$release_revision"
+tag=$upstream_tag-$release_revision
+version=$upstream_version-$release_revision
 overwrite=${OVERWRITE:-false}
 [[ "$overwrite" == true || "$overwrite" == false ]] || { echo "无效的 overwrite 输入: $overwrite" >&2; exit 1; }
 repo=${GITHUB_REPOSITORY:?}
-existing=$(find_release "$repo" "$tag")
-if [[ "$overwrite" == false && $(jq -r '.draft' <<< "$existing") == false ]] && published_release_has_assets "$existing" "$version"; then
+existing=$(gh api --paginate --slurp "repos/$repo/releases?per_page=100" | find_release "$tag")
+if [[ "$overwrite" == false && $(jq -r '.draft' <<< "$existing") == false ]] && release_has_assets "$existing" "$version"; then
   if jq -e '.prerelease == true' <<< "$existing" >/dev/null; then
     gh release edit "$tag" --repo "$repo" --prerelease=false
     echo "$tag 已转为正式发布。"
@@ -23,7 +27,7 @@ upstream_revision=${UPSTREAM_REVISION:?}
 [[ "$upstream_revision" =~ ^[0-9a-f]{40}$ ]]
 cd -- "${1:?请输入工作流产物目录}"
 
-mapfile -t packages < <(package_names "$version")
+mapfile -t packages < <(release_package_names "$version")
 mapfile -t assets < <(asset_names "$version")
 for file in "${assets[@]}"; do
   test -s "$file"
@@ -48,7 +52,7 @@ verify_uploaded_assets() {
 
 title="DSH Linux $version"
 notes=$(cat <<NOTES
-上游版本 [\`$tag\`](https://github.com/$UPSTREAM_REPOSITORY/releases/tag/$tag) 的 DSH Linux 社区构建，适用于 x86_64。
+上游版本 [\`$upstream_tag\`](https://github.com/$UPSTREAM_REPOSITORY/releases/tag/$upstream_tag) 的 DSH Linux 社区构建，适用于 x86_64 和 ARM64。
 
 - Debian / Ubuntu：下载 \`.deb\`，运行 \`sudo apt install ./文件名.deb\`。
 - Fedora：下载 \`.rpm\`，运行 \`sudo dnf install ./文件名.rpm\`。
@@ -93,7 +97,7 @@ else
       --title "$title" --notes "$notes"
     # The releases list can briefly omit a draft immediately after creation.
     for delay in 1 2 4 8 16; do
-      if existing=$(find_release "$repo" "$tag") && jq -e '.draft == true' <<< "$existing" >/dev/null; then
+      if existing=$(gh api --paginate --slurp "repos/$repo/releases?per_page=100" | find_release "$tag") && jq -e '.draft == true' <<< "$existing" >/dev/null; then
         break
       fi
       sleep "$delay"

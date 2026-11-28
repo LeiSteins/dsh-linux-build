@@ -19,16 +19,17 @@ index 00000000..3bf6ae50
 +resources=$(CDPATH= cd -- "$(dirname -- "$launcher")/../../.." && pwd -P)
 +exec "$resources/runtime/primary-runtime/dependencies/node/bin/node" --expose-internals "$resources/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" "$@"
 diff --git a/apps/desktop/scripts/desktop-build-paths.d.mts b/apps/desktop/scripts/desktop-build-paths.d.mts
-index aaf7159d..79444847 100644
+index aaf7159d..5aacede9 100644
 --- a/apps/desktop/scripts/desktop-build-paths.d.mts
 +++ b/apps/desktop/scripts/desktop-build-paths.d.mts
-@@ -1,4 +1,12 @@
+@@ -1,4 +1,13 @@
 -import type { DesktopAutoUpdateTarget } from '@deepseek-ai/dsh-desktop-publisher/desktop-auto-update-environment.mjs'
 +interface DesktopBuildTargetPlatforms {
 +  readonly 'mac-arm64': { readonly platform: 'darwin'; readonly arch: 'arm64' }
 +  readonly 'mac-x64': { readonly platform: 'darwin'; readonly arch: 'x64' }
 +  readonly 'win-x64': { readonly platform: 'win32'; readonly arch: 'x64' }
 +  readonly 'linux-x64': { readonly platform: 'linux'; readonly arch: 'x64' }
++  readonly 'linux-arm64': { readonly platform: 'linux'; readonly arch: 'arm64' }
 +}
 +
 +/** Targets supported by desktop runtime and package preparation. */
@@ -36,7 +37,7 @@ index aaf7159d..79444847 100644
  
  /** Mutable target directories plus shared download and package caches. */
  export interface DesktopTargetBuildPaths {
-@@ -29,7 +37,7 @@ export function resolveDesktopBuildTarget(
+@@ -29,7 +38,7 @@ export function resolveDesktopBuildTarget(
    env?: NodeJS.ProcessEnv,
    hostPlatform?: NodeJS.Platform,
    hostArch?: string,
@@ -45,7 +46,7 @@ index aaf7159d..79444847 100644
  
  /**
   * Return the mutable preparation and artifact directories owned by one release target.
-@@ -37,7 +45,7 @@ export function resolveDesktopBuildTarget(
+@@ -37,7 +46,7 @@ export function resolveDesktopBuildTarget(
   * @param environment - Packaging environment with an optional absolute cache directory.
   * @returns Target paths plus shared download and package caches.
   */
@@ -54,7 +55,7 @@ index aaf7159d..79444847 100644
  
  /**
   * Return the platform and architecture of the payload one release target prepares.
-@@ -45,10 +53,7 @@ export function desktopTargetBuildPaths(target: DesktopAutoUpdateTarget, environ
+@@ -45,10 +54,7 @@ export function desktopTargetBuildPaths(target: DesktopAutoUpdateTarget, environ
   * @param target - Supported Desktop target name.
   * @returns Platform and architecture of the prepared payload.
   */
@@ -67,10 +68,10 @@ index aaf7159d..79444847 100644
  /**
   * Resolve the paths owned by the target selected in a packaging environment.
 diff --git a/apps/desktop/scripts/desktop-build-paths.mjs b/apps/desktop/scripts/desktop-build-paths.mjs
-index edfd9cdf..ea5f6571 100644
+index edfd9cdf..692c29e4 100644
 --- a/apps/desktop/scripts/desktop-build-paths.mjs
 +++ b/apps/desktop/scripts/desktop-build-paths.mjs
-@@ -4,14 +4,20 @@ import { isAbsolute, join, resolve } from 'node:path'
+@@ -4,14 +4,21 @@ import { isAbsolute, join, resolve } from 'node:path'
  
  const APP_ROOT = resolve(import.meta.dirname, '..')
  const BUILD_ROOT = join(APP_ROOT, '.desktop-build')
@@ -80,6 +81,7 @@ index edfd9cdf..ea5f6571 100644
 +  'mac-x64': { platform: 'darwin', arch: 'x64' },
 +  'win-x64': { platform: 'win32', arch: 'x64' },
 +  'linux-x64': { platform: 'linux', arch: 'x64' },
++  'linux-arm64': { platform: 'linux', arch: 'arm64' },
 +})
 +/** @typedef {keyof typeof TARGETS} DesktopBuildTarget */
  
@@ -93,7 +95,7 @@ index edfd9cdf..ea5f6571 100644
   */
  export function resolveDesktopBuildTarget(
    env = process.env,
-@@ -23,21 +29,23 @@ export function resolveDesktopBuildTarget(
+@@ -23,21 +30,23 @@ export function resolveDesktopBuildTarget(
      ?? (platform === 'win32' || platform === 'win' ? 'x64' : hostArch)
    const os = platform === 'darwin' ? 'mac' : platform === 'win32' || platform === 'win' ? 'win' : platform
    const target = `${os}-${arch}`
@@ -123,7 +125,7 @@ index edfd9cdf..ea5f6571 100644
   * @param {NodeJS.ProcessEnv} environment - Packaging environment with an optional absolute cache directory.
   * @returns {{ root: string, artifacts: string, unsignedArtifacts: string, unnotarizedArtifacts: string, runtime: string, packageSet: string, dsh: string, dshPnpm: string, electron: string, packedDsh: string, packedVendor: string, packedLandlock: string, downloads: string, pnpmStore: string }} Target paths plus shared download and package caches.
   */
-@@ -70,17 +78,13 @@ export function desktopTargetBuildPaths(target, environment = process.env) {
+@@ -70,17 +79,13 @@ export function desktopTargetBuildPaths(target, environment = process.env) {
  /**
   * Return the platform and architecture of the payload one release target prepares.
   * Windows is prepared as x64 only, so this differs from the build host on an arm64 Windows machine.
@@ -261,7 +263,7 @@ index 4e338532..84439078 100644
    await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:cli', async () => { prepareCli(target) })
    writeFileSync(join(RUNTIME_ROOT, 'versions.json'), `${JSON.stringify({
 diff --git a/apps/desktop/scripts/retain-desktop-ci.ts b/apps/desktop/scripts/retain-desktop-ci.ts
-index d26e6a06..3c2fa94e 100644
+index d26e6a06..fa989ce2 100644
 --- a/apps/desktop/scripts/retain-desktop-ci.ts
 +++ b/apps/desktop/scripts/retain-desktop-ci.ts
 @@ -18,13 +18,19 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -270,7 +272,7 @@ index d26e6a06..3c2fa94e 100644
  
 +function resolveDesktopRetentionTarget(env: NodeJS.ProcessEnv) {
 +  const target = resolveDesktopBuildTarget(env)
-+  if (target === 'linux-x64') throw new Error('desktop retention: unsupported target linux-x64')
++  if (target === 'linux-x64' || target === 'linux-arm64') throw new Error(`desktop retention: unsupported target ${target}`)
 +  return target
 +}
 +
@@ -318,46 +320,50 @@ index 291ed084..8a22c614 100644
  }
  
 diff --git a/apps/desktop/tests/desktop-build-paths.spec.ts b/apps/desktop/tests/desktop-build-paths.spec.ts
-index f9891ebb..887311c2 100644
+index f9891ebb..378cd5e3 100644
 --- a/apps/desktop/tests/desktop-build-paths.spec.ts
 +++ b/apps/desktop/tests/desktop-build-paths.spec.ts
-@@ -13,6 +13,7 @@ describe('desktop build paths', () => {
+@@ -13,6 +13,8 @@ describe('desktop build paths', () => {
      const arm64 = desktopTargetBuildPaths('mac-arm64')
      const x64 = desktopTargetBuildPaths('mac-x64')
      const windows = desktopTargetBuildPaths('win-x64')
-+    const linux = desktopTargetBuildPaths('linux-x64')
++    const linuxX64 = desktopTargetBuildPaths('linux-x64')
++    const linuxArm64 = desktopTargetBuildPaths('linux-arm64')
      const mutableKeys = [
        'root',
        'artifacts',
-@@ -29,11 +30,12 @@ describe('desktop build paths', () => {
+@@ -29,11 +31,13 @@ describe('desktop build paths', () => {
      ] as const
  
      for (const key of mutableKeys) {
 -      expect(new Set([arm64[key], x64[key], windows[key]]).size).toBe(3)
-+      expect(new Set([arm64[key], x64[key], windows[key], linux[key]]).size).toBe(4)
++      expect(new Set([arm64[key], x64[key], windows[key], linuxX64[key], linuxArm64[key]]).size).toBe(5)
      }
      expect(arm64.artifacts).toContain(join('targets', 'mac-arm64', 'artifacts'))
      expect(x64.dsh).toContain(join('targets', 'mac-x64', 'dsh'))
      expect(windows.runtime).toContain(join('targets', 'win-x64', 'runtime'))
-+    expect(linux.runtime).toContain(join('targets', 'linux-x64', 'runtime'))
++    expect(linuxX64.runtime).toContain(join('targets', 'linux-x64', 'runtime'))
++    expect(linuxArm64.runtime).toContain(join('targets', 'linux-arm64', 'runtime'))
    })
  
    it('shares download and package caches outside target output directories', () => {
-@@ -52,7 +54,7 @@ describe('desktop build paths', () => {
+@@ -52,7 +56,7 @@ describe('desktop build paths', () => {
      const paths = resolveDesktopTargetBuildPaths(environment, 'win32', 'x64')
      expect(paths).toEqual({ ...defaults, downloads: join(cache, 'downloads'), pnpmStore: join(cache, 'pnpm-store') })
      expect(desktopTargetBuildPaths('mac-arm64', environment).pnpmStore).toBe(paths.pnpmStore)
 -    for (const target of ['mac-arm64', 'mac-x64', 'win-x64'] as const) {
-+    for (const target of ['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'] as const) {
++    for (const target of ['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64', 'linux-arm64'] as const) {
        const configured = desktopTargetBuildPaths(target, environment)
        expect(configured.downloads).toBe(join(cache, 'downloads'))
        expect(configured.pnpmStore).toBe(join(cache, 'pnpm-store'))
-@@ -73,13 +75,16 @@ describe('desktop build paths', () => {
+@@ -73,13 +77,18 @@ describe('desktop build paths', () => {
        .toContain(join('targets', 'mac-x64', 'runtime', 'primary-runtime'))
      expect(developmentRuntimeDirectory({}, 'win32', 'arm64'))
        .toContain(join('targets', 'win-x64', 'runtime', 'primary-runtime'))
 +    expect(developmentRuntimeDirectory({}, 'linux', 'x64'))
 +      .toContain(join('targets', 'linux-x64', 'runtime', 'primary-runtime'))
++    expect(developmentRuntimeDirectory({}, 'linux', 'arm64'))
++      .toContain(join('targets', 'linux-arm64', 'runtime', 'primary-runtime'))
    })
  
    it('maps every target to the platform and architecture of the payload it prepares', () => {
@@ -366,19 +372,20 @@ index f9891ebb..887311c2 100644
      expect(desktopTargetPlatform('win-x64')).toEqual({ platform: 'win32', arch: 'x64' })
 -    expect(() => desktopTargetPlatform('linux-x64' as 'mac-x64')).toThrow(/unsupported target/u)
 +    expect(desktopTargetPlatform('linux-x64')).toEqual({ platform: 'linux', arch: 'x64' })
-+    expect(() => Reflect.apply(desktopTargetPlatform, undefined, ['linux-arm64'])).toThrow(/unsupported target/u)
++    expect(desktopTargetPlatform('linux-arm64')).toEqual({ platform: 'linux', arch: 'arm64' })
    })
  
    it('resolves environment overrides and rejects unsupported targets', () => {
-@@ -88,7 +93,8 @@ describe('desktop build paths', () => {
+@@ -88,7 +97,9 @@ describe('desktop build paths', () => {
        DSH_DESKTOP_TARGET_ARCH: 'x64',
      }, 'darwin', 'arm64')).toBe('mac-x64')
      expect(resolveDesktopBuildTarget({}, 'win32', 'x64')).toBe('win-x64')
 -    expect(() => resolveDesktopBuildTarget({}, 'linux', 'x64')).toThrow(/unsupported target/u)
 -    expect(() => desktopTargetBuildPaths('linux-x64' as 'mac-x64')).toThrow(/unsupported target/u)
 +    expect(resolveDesktopBuildTarget({}, 'linux', 'x64')).toBe('linux-x64')
-+    expect(() => resolveDesktopBuildTarget({}, 'linux', 'arm64')).toThrow(/unsupported target/u)
-+    expect(() => Reflect.apply(desktopTargetBuildPaths, undefined, ['linux-arm64'])).toThrow(/unsupported target/u)
++    expect(resolveDesktopBuildTarget({}, 'linux', 'arm64')).toBe('linux-arm64')
++    expect(() => resolveDesktopBuildTarget({}, 'linux', 'arm')).toThrow(/unsupported target/u)
++    expect(() => Reflect.apply(desktopTargetBuildPaths, undefined, ['linux-arm'])).toThrow(/unsupported target/u)
    })
  })
 diff --git a/apps/desktop/tests/fixtures/pnpm-smoke.mjs b/apps/desktop/tests/fixtures/pnpm-smoke.mjs
@@ -435,7 +442,7 @@ index e689f3e6..5be25147 100644
        ? join('desktop-test-resources', 'runtime', 'primary-runtime') : 'test-primary-runtime')
      expect(host.packageManager).toMatchObject({
 diff --git a/apps/desktop/tests/prepare-package-set.spec.ts b/apps/desktop/tests/prepare-package-set.spec.ts
-index db9efee0..a4f913f8 100644
+index db9efee0..1985b1a9 100644
 --- a/apps/desktop/tests/prepare-package-set.spec.ts
 +++ b/apps/desktop/tests/prepare-package-set.spec.ts
 @@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
@@ -453,14 +460,14 @@ index db9efee0..a4f913f8 100644
 -  ['darwin', 'arm64', true], ['darwin', 'x64', true], ['win32', 'x64', false],
 -] as const)('selects the CUA native tarball for target %s/%s independently of the host', (platform, arch, included) => {
 -  const selected = selectDesktopPackageClosure(targetManifests(), { platform, arch }).map(entry => entry.manifest.name)
-+  ['mac-arm64', true], ['mac-x64', true], ['win-x64', false], ['linux-x64', false],
++  ['mac-arm64', true], ['mac-x64', true], ['win-x64', false], ['linux-x64', false], ['linux-arm64', false],
 +] as const)('selects the CUA native tarball for target %s independently of the host', (target, included) => {
 +  const selected = selectDesktopPackageClosure(targetManifests(), desktopTargetPlatform(target)).map(entry => entry.manifest.name)
    expect(selected.includes(macProvider)).toBe(included)
    expect(selected).toContain('@deepseek-ai/dsh-cua')
    expect(selected).toContain(cuaBundle)
 diff --git a/apps/desktop/tests/runtime-preparation.spec.ts b/apps/desktop/tests/runtime-preparation.spec.ts
-index 5da6e981..c2cba42e 100644
+index 5da6e981..351ce896 100644
 --- a/apps/desktop/tests/runtime-preparation.spec.ts
 +++ b/apps/desktop/tests/runtime-preparation.spec.ts
 @@ -5,14 +5,16 @@ import { rm } from 'node:fs/promises'
@@ -500,26 +507,29 @@ index 5da6e981..c2cba42e 100644
        python: '3.12.14', node: '24.17.0', pnpm: state.pnpm, pythonPackages: { numpy: '2.3.5' },
      }))
    })
-@@ -76,7 +77,7 @@ afterEach(async () => {
+@@ -76,9 +77,10 @@ afterEach(async () => {
    await rm(state.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
  })
  
 -it.each(['mac-arm64', 'mac-x64', 'win-x64'] as const)('prepares %s with one pnpm distribution and its CLI resources', async (target) => {
-+it.each(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'] as const)('prepares %s with one pnpm distribution and its CLI resources', async (target) => {
++it.each(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64', 'linux-arm64'] as const)('prepares %s with one pnpm distribution and its CLI resources', async (target) => {
    state.target = target
    const windows = target === 'win-x64'
++  const linux = desktopTargetPlatform(target).platform === 'linux'
    if (windows) process.argv.push('--defer-primary-runtime-smoke')
-@@ -90,10 +91,11 @@ it.each(['mac-arm64', 'mac-x64', 'win-x64'] as const)('prepares %s with one pnpm
+   const runtime = join(state.root, 'runtime')
+   mkdirSync(join(runtime, 'pnpm'), { recursive: true })
+@@ -90,10 +92,11 @@ it.each(['mac-arm64', 'mac-x64', 'win-x64'] as const)('prepares %s with one pnpm
    expect(readFileSync(join(runtime, 'cli', 'command-manager.js'), 'utf8')).toBe('command manager fixture')
    expect(existsSync(join(runtime, 'cli', 'command-path.ps1'))).toBe(true)
    expect(JSON.parse(readFileSync(join(runtime, 'versions.json'), 'utf8'))).toEqual({
 -    schemaVersion: 1, node: '24.18.1', pnpm: '11.7.0',
-+    schemaVersion: 1, node: target === 'linux-x64' ? '24.17.0' : '24.18.1', pnpm: '11.7.0',
++    schemaVersion: 1, node: linux ? '24.17.0' : '24.18.1', pnpm: '11.7.0',
    })
    expect(state.preparePrimary).toHaveBeenCalledWith({ deferSmoke: windows })
 -  if (windows) expect(state.commandLink).not.toHaveBeenCalled()
-+  if (target === 'linux-x64') expect(state.execFile).not.toHaveBeenCalled()
-+  if (windows || target === 'linux-x64') expect(state.commandLink).not.toHaveBeenCalled()
++  if (linux) expect(state.execFile).not.toHaveBeenCalled()
++  if (windows || linux) expect(state.commandLink).not.toHaveBeenCalled()
    else expect(state.commandLink).toHaveBeenCalledWith(join(runtime, 'cli'), target === 'mac-arm64' ? 'arm64' : 'x64', '12.0')
  })
  

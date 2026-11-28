@@ -1,16 +1,24 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { desktopTargetBuildPaths } from './scripts/desktop-build-paths.mjs'
+import { desktopTargetBuildPaths, resolveDesktopBuildTarget } from './scripts/desktop-build-paths.mjs'
 import { createElectronBuilderConfig } from './scripts/electron-builder-config.mjs'
 
 const config = createElectronBuilderConfig()
-const { root, dsh, electron } = desktopTargetBuildPaths('linux-x64')
+const target = resolveDesktopBuildTarget()
+if (target !== 'linux-x64' && target !== 'linux-arm64') throw new Error('Linux packaging requires a Linux target')
+const { root, dsh, electron } = desktopTargetBuildPaths(target)
+const pacmanArch = target === 'linux-arm64' ? 'aarch64' : 'x86_64'
 const upstreamRoot = fileURLToPath(new URL('../../', import.meta.url))
 const productName = process.env.DSH_DESKTOP_LINUX_CLIENT_TITLE
 if (!productName) throw new Error('DSH_DESKTOP_LINUX_CLIENT_TITLE is required for Linux packaging')
+const version = process.env.DSH_DESKTOP_LINUX_VERSION
+const revision = process.env.DSH_DESKTOP_LINUX_REVISION
+const nativeVersion = process.env.DSH_DESKTOP_NATIVE_VERSION
 const pacmanVersion = process.env.DSH_DESKTOP_PACMAN_VERSION
-if (!pacmanVersion) throw new Error('DSH_DESKTOP_PACMAN_VERSION is required for Linux packaging')
+if (!version || !revision || !nativeVersion || !pacmanVersion) throw new Error('Linux packaging requires release and package versions')
+// DEB and RPM compare the upstream version before the package revision.
+const nativePackageVersion = ['--version', nativeVersion, '--iteration', revision]
 const executableName = 'dsh-linux'
 const maintainer = 'DSH Linux (Community) <noreply@github.com>'
 const homepage = 'https://github.com/deepseek-ai/deepseek-harness'
@@ -24,7 +32,8 @@ export default {
   productName,
   executableName,
   artifactName: 'dsh-linux-${version}-${arch}.${ext}',
-  extraMetadata: { ...config.extraMetadata, homepage, desktopName: `${executableName}.desktop` },
+  // Use the Linux release version for the Electron shell and installer filenames.
+  extraMetadata: { ...config.extraMetadata, version, homepage, desktopName: `${executableName}.desktop` },
   // electron-builder embeds this provider in resources/app-update.yml even with --publish never.
   publish: [{ provider: 'github', owner, repo, publishAutoUpdate: false }],
   linux: { ...config.linux, icon: join(root, 'linux-icons'), maintainer, syncDesktopName: true },
@@ -39,6 +48,7 @@ export default {
   ],
   deb: {
     packageName: executableName,
+    fpm: nativePackageVersion,
     depends: [
       'libgtk-3-0t64 | libgtk-3-0', 'libnotify4', 'libnss3', 'libxss1', 'libxtst6',
       'xdg-utils', 'libatspi2.0-0t64 | libatspi2.0-0', 'libuuid1', 'libsecret-1-0',
@@ -47,6 +57,7 @@ export default {
   },
   rpm: {
     packageName: executableName,
+    fpm: nativePackageVersion,
     depends: [
       'gtk3', 'libnotify', 'nss', 'libXScrnSaver', '(libXtst or libXtst6)',
       'xdg-utils', 'at-spi2-core', '(libuuid or libuuid1)', 'libsecret',
@@ -55,9 +66,9 @@ export default {
   },
   pacman: {
     packageName: executableName,
-    artifactName: 'dsh-linux-${version}-x86_64.pkg.tar.zst',
+    artifactName: `dsh-linux-\${version}-${pacmanArch}.pkg.tar.zst`,
     compression: 'zstd',
-    fpm: ['--version', pacmanVersion, '--iteration', '1'],
+    fpm: ['--version', pacmanVersion, '--iteration', revision],
     depends: [
       'gtk3', 'libnotify', 'nss', 'libxss', 'libxtst', 'xdg-utils', 'at-spi2-core',
       'util-linux-libs', 'libsecret', 'mesa', 'alsa-lib', 'libcups', 'libxkbcommon', 'ttf-liberation',
