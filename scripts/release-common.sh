@@ -30,19 +30,15 @@ pacman_version() {
 }
 
 package_names() {
-  local version=$1 arch=$2 deb_arch appimage_arch
-  case "$arch" in
-    x86_64) deb_arch=amd64; appimage_arch=x86_64 ;;
-    aarch64) deb_arch=arm64; appimage_arch=arm64 ;;
-    *) echo "不支持的 Linux 架构: $arch" >&2; return 1 ;;
-  esac
-  printf '%s\n' "dsh-linux-$version-$deb_arch.deb" "dsh-linux-$version-$arch.rpm" \
-    "dsh-linux-$version-$appimage_arch.AppImage" "dsh-linux-$version-$arch.pkg.tar.zst"
+  local version=$1 arch=$2 extension
+  for extension in deb rpm AppImage pkg.tar.zst; do
+    printf 'dsh-linux-%s-%s.%s\n' "$version" "$arch" "$extension"
+  done
 }
 
 release_package_names() {
-  package_names "$1" x86_64
-  package_names "$1" aarch64
+  package_names "$1" amd64
+  package_names "$1" arm64
 }
 
 asset_names() {
@@ -69,4 +65,10 @@ release_has_assets() {
   names=$(asset_names "$2" | jq -Rn '[inputs]') || return
   missing=$(missing_asset_names "$1" "$names") || return
   [[ -z "$missing" ]]
+}
+
+release_has_legacy_names() {
+  jq -e --arg prefix "dsh-linux-$2-" '
+    any(.assets[]?.name; startswith($prefix + "x86_64.") or startswith($prefix + "aarch64."))
+  ' <<< "$1" >/dev/null
 }

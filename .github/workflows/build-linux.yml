@@ -8,7 +8,7 @@ on:
         type: string
         required: false
       release_revision:
-        description: Linux 发布修订号，留空沿用该上游版本的最高修订号
+        description: Linux 发布修订号，留空自动选择
         type: string
         required: false
       publish:
@@ -70,11 +70,11 @@ jobs:
       matrix:
         include:
           - arch: x64
-            package_arch: x86_64
+            package_arch: amd64
             runner: ubuntu-24.04
             timeout: 90
           - arch: arm64
-            package_arch: aarch64
+            package_arch: arm64
             runner: ubuntu-24.04-arm
             timeout: 180
     steps:
@@ -151,7 +151,7 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           mkdir dist
-          for arch in x86_64 aarch64; do
+          for arch in amd64 arm64; do
             dir="artifacts/dsh-linux-$VERSION-$arch"
             cat "$dir/SHA256SUMS" >> dist/SHA256SUMS
             mv -- "$dir"/dsh-linux-* dist/

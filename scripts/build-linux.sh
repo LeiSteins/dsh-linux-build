@@ -21,11 +21,11 @@ if [[ "$output/" == "$upstream/"* ]]; then
 fi
 cd -- "$upstream"
 
-package_arch=$(uname -m)
-case "$(uname -s):$package_arch" in
-  Linux:x86_64) arch=x64; deb_arch=amd64; unpacked=linux-unpacked ;;
-  Linux:aarch64) arch=arm64; deb_arch=arm64; unpacked=linux-arm64-unpacked ;;
-  *) echo '构建需要 Linux x86_64 或 aarch64。' >&2; exit 1 ;;
+native_arch=$(uname -m)
+case "$(uname -s):$native_arch" in
+  Linux:x86_64) arch=x64; package_arch=amd64; unpacked=linux-unpacked ;;
+  Linux:aarch64) arch=arm64; package_arch=arm64; unpacked=linux-arm64-unpacked ;;
+  *) echo '构建需要 Linux amd64 或 arm64。' >&2; exit 1 ;;
 esac
 if [[ ${DSH_DESKTOP_TARGET_ARCH:-$arch} != "$arch" ]]; then
   echo "构建架构必须与宿主一致: $arch" >&2
@@ -179,10 +179,10 @@ for file in "${packages[@]}"; do
   test -s "$stage/$file"
 done
 native_version=$DSH_DESKTOP_NATIVE_VERSION-$release_revision
-[[ $(dpkg-deb -f "$stage/${packages[0]}" Architecture) == "$deb_arch" ]]
+[[ $(dpkg-deb -f "$stage/${packages[0]}" Architecture) == "$package_arch" ]]
 [[ $(dpkg-deb -f "$stage/${packages[0]}" Version) == "$native_version" ]]
 mkdir "$stage/rpmdb"
-[[ $(rpm --dbpath "$stage/rpmdb" -qp --queryformat '%{ARCH} %{VERSION}-%{RELEASE}' "$stage/${packages[1]}") == "$package_arch $native_version" ]]
+[[ $(rpm --dbpath "$stage/rpmdb" -qp --queryformat '%{ARCH} %{VERSION}-%{RELEASE}' "$stage/${packages[1]}") == "$native_arch $native_version" ]]
 launcher_icon=/usr/share/icons/hicolor/256x256/apps/dsh-linux.png
 dpkg-deb --fsys-tarfile "$stage/${packages[0]}" | tar -t | grep -Fx ".$launcher_icon"
 rpm --dbpath "$stage/rpmdb" -qpl "$stage/${packages[1]}" | grep -Fx "$launcher_icon"
@@ -190,7 +190,7 @@ pacman_package="$stage/${packages[3]}"
 pkginfo=$(bsdtar -xOf "$pacman_package" .PKGINFO)
 grep -Fx 'pkgname = dsh-linux' <<< "$pkginfo"
 grep -Fx "pkgver = $DSH_DESKTOP_PACMAN_VERSION-$release_revision" <<< "$pkginfo"
-grep -Fx "arch = $package_arch" <<< "$pkginfo"
+grep -Fx "arch = $native_arch" <<< "$pkginfo"
 bsdtar -tf "$pacman_package" | grep -Fx "${launcher_icon#/}"
 bsdtar -xOf "$pacman_package" "opt/$DSH_DESKTOP_LINUX_CLIENT_TITLE/resources/dsh-linux-package-type" | grep -Fx pacman
 mkdir "$stage/appimage-test"

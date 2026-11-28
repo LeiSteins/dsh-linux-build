@@ -40,26 +40,24 @@ if [[ -z "$release_revision" ]]; then
       release_revision=1
     fi
   elif [[ "$overwrite" == false ]]; then
-    # Keep the existing checksums and packages intact when introducing the second architecture.
+    # Keep existing packages and their checksums at the revision that published them.
     previous=$(find_release "$upstream_tag-$release_revision" <<< "$releases")
-    previous_version=$upstream_version-$release_revision
-    x64_assets=$({ package_names "$previous_version" x86_64; printf '%s\n' SHA256SUMS; } | jq -Rn '[inputs]')
-    arm_packages=$(package_names "$previous_version" aarch64)
-    arm_assets=$(jq -Rn '[inputs]' <<< "$arm_packages")
-    if [[ $(jq -r '.draft' <<< "$previous") == false \
-      && -z $(missing_asset_names "$previous" "$x64_assets") \
-      && $(missing_asset_names "$previous" "$arm_assets") == "$arm_packages" ]]; then
+    if release_has_legacy_names "$previous" "$upstream_version-$release_revision"; then
       release_revision=$((release_revision + 1))
     fi
   fi
 fi
 release_tag=$upstream_tag-$release_revision
 version=$upstream_version-$release_revision
+existing=$(find_release "$release_tag" <<< "$releases")
+if release_has_legacy_names "$existing" "$version"; then
+  echo "$release_tag 已包含旧命名的安装包，请指定更高的发布修订号。" >&2
+  exit 1
+fi
 
 should_build=true
 promote_existing=false
 if [[ "$rebuild" == false && "$overwrite" == false ]]; then
-  existing=$(find_release "$release_tag" <<< "$releases")
   if [[ $(jq -r '.draft' <<< "$existing") == false ]] && release_has_assets "$existing" "$version"; then
     should_build=false
     if jq -e '.prerelease == true' <<< "$existing" >/dev/null; then

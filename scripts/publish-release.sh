@@ -12,6 +12,10 @@ overwrite=${OVERWRITE:-false}
 [[ "$overwrite" == true || "$overwrite" == false ]] || { echo "无效的 overwrite 输入: $overwrite" >&2; exit 1; }
 repo=${GITHUB_REPOSITORY:?}
 existing=$(gh api --paginate --slurp "repos/$repo/releases?per_page=100" | find_release "$tag")
+if release_has_legacy_names "$existing" "$version"; then
+  echo "$tag 已包含旧命名的安装包，请指定更高的发布修订号。" >&2
+  exit 1
+fi
 if [[ "$overwrite" == false && $(jq -r '.draft' <<< "$existing") == false ]] && release_has_assets "$existing" "$version"; then
   if jq -e '.prerelease == true' <<< "$existing" >/dev/null; then
     gh release edit "$tag" --repo "$repo" --prerelease=false
@@ -52,7 +56,7 @@ verify_uploaded_assets() {
 
 title="DSH Linux $version"
 notes=$(cat <<NOTES
-上游版本 [\`$upstream_tag\`](https://github.com/$UPSTREAM_REPOSITORY/releases/tag/$upstream_tag) 的 DSH Linux 社区构建，适用于 x86_64 和 ARM64。
+上游版本 [\`$upstream_tag\`](https://github.com/$UPSTREAM_REPOSITORY/releases/tag/$upstream_tag) 的 DSH Linux 社区构建，适用于 amd64 和 arm64。
 
 - Debian / Ubuntu：下载 \`.deb\`，运行 \`sudo apt install ./文件名.deb\`。
 - Fedora：下载 \`.rpm\`，运行 \`sudo dnf install ./文件名.rpm\`。

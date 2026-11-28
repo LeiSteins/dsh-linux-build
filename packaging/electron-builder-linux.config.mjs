@@ -8,7 +8,7 @@ const config = createElectronBuilderConfig()
 const target = resolveDesktopBuildTarget()
 if (target !== 'linux-x64' && target !== 'linux-arm64') throw new Error('Linux packaging requires a Linux target')
 const { root, dsh, electron } = desktopTargetBuildPaths(target)
-const pacmanArch = target === 'linux-arm64' ? 'aarch64' : 'x86_64'
+const packageArch = target === 'linux-arm64' ? 'arm64' : 'amd64'
 const upstreamRoot = fileURLToPath(new URL('../../', import.meta.url))
 const productName = process.env.DSH_DESKTOP_LINUX_CLIENT_TITLE
 if (!productName) throw new Error('DSH_DESKTOP_LINUX_CLIENT_TITLE is required for Linux packaging')
@@ -31,7 +31,7 @@ export default {
   electronVersion: readFileSync(join(electron, 'version'), 'utf8').trim(),
   productName,
   executableName,
-  artifactName: 'dsh-linux-${version}-${arch}.${ext}',
+  artifactName: `dsh-linux-\${version}-${packageArch}.\${ext}`,
   // Use the Linux release version for the Electron shell and installer filenames.
   extraMetadata: { ...config.extraMetadata, version, homepage, desktopName: `${executableName}.desktop` },
   // electron-builder embeds this provider in resources/app-update.yml even with --publish never.
@@ -66,7 +66,7 @@ export default {
   },
   pacman: {
     packageName: executableName,
-    artifactName: `dsh-linux-\${version}-${pacmanArch}.pkg.tar.zst`,
+    artifactName: `dsh-linux-\${version}-${packageArch}.pkg.tar.zst`,
     compression: 'zstd',
     fpm: ['--version', pacmanVersion, '--iteration', revision],
     depends: [

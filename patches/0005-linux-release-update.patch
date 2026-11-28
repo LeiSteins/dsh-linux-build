@@ -13,19 +13,21 @@ index 911681ca..f6b59cd6 100644
      subscribe(listener: (state: DesktopUpdatePresentation) => void): () => void
 diff --git a/apps/desktop/src/linux-release-update.ts b/apps/desktop/src/linux-release-update.ts
 new file mode 100644
-index 00000000..acb92f4e
+index 00000000..4b8c2578
 --- /dev/null
 +++ b/apps/desktop/src/linux-release-update.ts
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,236 @@
 +/** Read the public DSH Linux release list for user-initiated update checks. */
 +
 +import { compare, valid } from 'semver'
 +import { load } from 'js-yaml'
 +
-+const installerSuffixesByArch = {
-+  x64: { deb: 'amd64.deb', rpm: 'x86_64.rpm', appimage: 'x86_64.AppImage', pacman: 'x86_64.pkg.tar.zst' },
-+  arm64: { deb: 'arm64.deb', rpm: 'aarch64.rpm', appimage: 'arm64.AppImage', pacman: 'aarch64.pkg.tar.zst' },
++const installerArchitectures = {
++  x64: ['amd64', 'x86_64'],
++  arm64: ['arm64', 'aarch64'],
 +} as const
++
++const installerExtensions = { deb: 'deb', rpm: 'rpm', appimage: 'AppImage', pacman: 'pkg.tar.zst' } as const
 +
 +type ReleaseUnavailable = { readonly kind: 'current' | 'incomplete' | 'network-error' | 'service-error' }
 +
@@ -72,6 +74,25 @@ index 00000000..acb92f4e
 +  return uploaded
 +}
 +
++function findReleaseInstallers(
++  uploaded: Map<string, number>,
++  version: string,
++  architectures: readonly string[],
++  packageType: string | undefined,
++): Map<string, string> | undefined {
++  if (!uploaded.has('SHA256SUMS')) return undefined
++  const installers = new Map<string, string>()
++  for (const [type, extension] of Object.entries(installerExtensions)) {
++    // Older releases can still update installers that existed before Arch support.
++    if (type === 'pacman' && packageType !== 'pacman') continue
++    const installer = architectures.map(arch => installerName(version, `${arch}.${extension}`))
++      .find(name => uploaded.has(name))
++    if (installer === undefined) return undefined
++    installers.set(type, installer)
++  }
++  return installers
++}
++
 +function mirrorPrefix(value: string | undefined): string | undefined {
 +  if (!value?.trim()) return undefined
 +  const url = URL.parse(value.trim())
@@ -89,6 +110,7 @@ index 00000000..acb92f4e
 +  readonly kind: 'available'
 +  readonly version: string
 +  readonly order: LinuxVersion
++  readonly installer: string | undefined
 +  readonly installerSize: number | undefined
 +}
 +
@@ -109,8 +131,8 @@ index 00000000..acb92f4e
 +async function findLinuxRelease(
 +  releasesApi: string,
 +  currentVersion: LinuxVersion,
-+  requiredSuffixes: readonly string[],
-+  suffix: string | undefined,
++  architectures: readonly string[],
++  packageType: string | undefined,
 +  request: ReleaseRequest,
 +  signal: AbortSignal,
 +  timeout: number,
@@ -153,11 +175,13 @@ index 00000000..acb92f4e
 +      const order = parseLinuxVersion(version)
 +      if (order === undefined || !isNewerVersion(order, currentVersion)) continue
 +      const assets = uploadedAssets(release.assets)
-+      if (!assets.has('SHA256SUMS') || !requiredSuffixes.every(required => assets.has(installerName(version, required)))) {
++      const installers = findReleaseInstallers(assets, version, architectures, packageType)
++      if (installers === undefined) {
 +        incomplete = true
 +      } else if (best === undefined || isNewerVersion(order, best.order)) {
-+        const installerSize = suffix === undefined ? undefined : assets.get(installerName(version, suffix))
-+        best = { kind: 'available', version, order, installerSize }
++        const installer = packageType === undefined ? undefined : installers.get(packageType)
++        const installerSize = installer === undefined ? undefined : assets.get(installer)
++        best = { kind: 'available', version, order, installer, installerSize }
 +      }
 +    }
 +    // Follow pagination without trusting a response-supplied URL.
@@ -194,22 +218,17 @@ index 00000000..acb92f4e
 +  const releasesApi = `https://api.github.com/repos/${repository}/releases`
 +  const releasesPage = `https://github.com/${repository}/releases`
 +  const prefix = mirrorPrefix(mirror)
-+  const installers = Object.entries(installerSuffixesByArch[arch])
-+  const suffix = installers.find(([type]) => type === packageType)?.[1]
-+  // Older releases can still update installers that existed before Arch support.
-+  const requiredSuffixes = installers.filter(([type]) => type !== 'pacman' || packageType === 'pacman').map(([, name]) => name)
++  const architectures = installerArchitectures[arch]
 +  let release = prefix === undefined ? undefined
-+    : await findLinuxRelease(prefix + releasesApi, current, requiredSuffixes, suffix, request, signal, 6_000)
++    : await findLinuxRelease(prefix + releasesApi, current, architectures, packageType, request, signal, 6_000)
 +  signal.throwIfAborted()
 +  if (release === undefined || release.kind === 'network-error' || release.kind === 'service-error') {
-+    release = await findLinuxRelease(releasesApi, current, requiredSuffixes, suffix, request, signal, 15_000)
++    release = await findLinuxRelease(releasesApi, current, architectures, packageType, request, signal, 15_000)
 +  }
 +  if (release.kind !== 'available') return release
-+  const { version, installerSize } = release
++  const { version, installer, installerSize } = release
 +  const tag = `dsh-v${version}`
-+  if (suffix === undefined) return { kind: 'available', version, url: `${releasesPage}/tag/${tag}` }
-+
-+  const installer = installerName(version, suffix)
++  if (installer === undefined) return { kind: 'available', version, url: `${releasesPage}/tag/${tag}` }
 +  const url = `${releasesPage}/download/${tag}/${installer}`
 +  const official = { kind: 'available', version, installer, url } as const
 +  if (prefix === undefined || installerSize === undefined) return official
@@ -502,10 +521,10 @@ index 61b4678e..f031658b 100644
        subscribe(listener) {
 diff --git a/apps/desktop/tests/linux-release-update.spec.ts b/apps/desktop/tests/linux-release-update.spec.ts
 new file mode 100644
-index 00000000..c200d259
+index 00000000..00e11450
 --- /dev/null
 +++ b/apps/desktop/tests/linux-release-update.spec.ts
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,202 @@
 +import { expect, it, vi } from 'vitest'
 +import { checkLinuxReleaseUpdate } from '../src/linux-release-update.ts'
 +
@@ -524,14 +543,14 @@ index 00000000..c200d259
 +    draft, tag_name: `dsh-v${version}`,
 +    prerelease: version.includes('-'),
 +    assets: [
-+      `dsh-linux-${version}-amd64.deb`, `dsh-linux-${version}-x86_64.rpm`,
-+      `dsh-linux-${version}-x86_64.AppImage`, 'SHA256SUMS',
++      `dsh-linux-${version}-amd64.deb`, `dsh-linux-${version}-amd64.rpm`,
++      `dsh-linux-${version}-amd64.AppImage`, 'SHA256SUMS',
 +    ].map(name => ({ name, state: 'uploaded', size: 1 })),
 +  }
 +}
 +
 +it.each([
-+  ['deb', 'amd64.deb'], ['rpm', 'x86_64.rpm'], ['appimage', 'x86_64.AppImage'],
++  ['deb', 'amd64.deb'], ['rpm', 'amd64.rpm'], ['appimage', 'amd64.AppImage'],
 +])('recommends the %s package for the newest complete preview across pages', async (type, suffix) => {
 +  const incomplete = release('0.2.4-rc.1')
 +  incomplete.assets[0]!.state = 'open'
@@ -552,11 +571,11 @@ index 00000000..c200d259
 +})
 +
 +it.each([
-+  ['deb', 'arm64.deb'], ['rpm', 'aarch64.rpm'], ['appimage', 'arm64.AppImage'], ['pacman', 'aarch64.pkg.tar.zst'],
-+])('returns the ARM64 %s installer and skips a newer x86_64-only release', async (type, suffix) => {
++  ['deb', 'arm64.deb'], ['rpm', 'arm64.rpm'], ['appimage', 'arm64.AppImage'], ['pacman', 'arm64.pkg.tar.zst'],
++])('returns the ARM64 %s installer and skips a newer amd64-only release', async (type, suffix) => {
 +  const version = '0.2.3-alpha.2-2'
 +  const compatible = release(version)
-+  for (const armSuffix of ['arm64.deb', 'aarch64.rpm', 'arm64.AppImage', 'aarch64.pkg.tar.zst']) {
++  for (const armSuffix of ['arm64.deb', 'arm64.rpm', 'arm64.AppImage', 'arm64.pkg.tar.zst']) {
 +    compatible.assets.push({ name: `dsh-linux-${version}-${armSuffix}`, state: 'uploaded', size: 1 })
 +  }
 +  const unsupported = release('0.2.3-alpha.2-3')
@@ -566,6 +585,26 @@ index 00000000..c200d259
 +  })
 +  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2-1', 'arm64', type,
 +    async () => Response.json([unsupported]), signal)).resolves.toEqual({ kind: 'incomplete' })
++})
++
++it.each([
++  { arch: 'x64', canonical: 'amd64', legacy: 'x86_64' },
++  { arch: 'arm64', canonical: 'arm64', legacy: 'aarch64' },
++])('prefers $canonical filenames and still accepts $legacy filenames', async ({ arch, canonical, legacy }) => {
++  const version = '0.2.3-alpha.10'
++  const compatible = release(version)
++  compatible.assets = ['deb', 'AppImage'].map(ext => ({ name: `dsh-linux-${version}-${canonical}.${ext}`, state: 'uploaded', size: 1 }))
++    .concat(['rpm', 'pkg.tar.zst'].map(ext => ({ name: `dsh-linux-${version}-${legacy}.${ext}`, state: 'uploaded', size: 1 })))
++    .concat({ name: 'SHA256SUMS', state: 'uploaded', size: 1 })
++  const request = async () => Response.json([compatible])
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', arch, 'pacman', request, signal)).resolves.toMatchObject({
++    kind: 'available', url: downloadUrl(version, `${legacy}.pkg.tar.zst`),
++  })
++  const installer = `dsh-linux-${version}-${canonical}.pkg.tar.zst`
++  compatible.assets.push({ name: installer, state: 'uploaded', size: 1 })
++  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', arch, 'pacman', request, signal)).resolves.toMatchObject({
++    kind: 'available', installer, url: downloadUrl(version, `${canonical}.pkg.tar.zst`),
++  })
 +})
 +
 +it('accepts a full release after its preview and opens the page for an unpacked build', async () => {
@@ -607,12 +646,12 @@ index 00000000..c200d259
 +it('requires and recommends the pacman installer for an Arch installation', async () => {
 +  const newer = release('0.2.3-rc.1')
 +  const arch = release('0.2.3-alpha.10')
-+  const installer = 'dsh-linux-0.2.3-alpha.10-x86_64.pkg.tar.zst'
++  const installer = 'dsh-linux-0.2.3-alpha.10-amd64.pkg.tar.zst'
 +  arch.assets.push({ name: installer, state: 'uploaded', size: 1 })
 +  const request = async () => Response.json([newer, arch])
 +  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'x64', 'pacman', request, signal)).resolves.toEqual({
 +    kind: 'available', version: '0.2.3-alpha.10', installer,
-+    url: downloadUrl('0.2.3-alpha.10', 'x86_64.pkg.tar.zst'),
++    url: downloadUrl('0.2.3-alpha.10', 'amd64.pkg.tar.zst'),
 +  })
 +  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'x64', 'pacman',
 +    async () => Response.json([newer]), signal)).resolves.toEqual({ kind: 'incomplete' })
@@ -655,14 +694,14 @@ index 00000000..c200d259
 +
 +it('restarts the release lookup on GitHub after a mirror failure and uses GitHub if the mirror asset differs', async () => {
 +  const version = '0.2.3-alpha.10'
-+  const url = downloadUrl(version, 'x86_64.AppImage')
++  const url = downloadUrl(version, 'amd64.AppImage')
 +  const request = vi.fn()
 +    .mockResolvedValueOnce(Response.json([release('0.3.0')], { headers: { Link: '<ignored>; rel="next"' } }))
 +    .mockResolvedValueOnce(new Response(null, { status: 502 }))
 +    .mockResolvedValueOnce(Response.json([release(version)]))
 +    .mockResolvedValueOnce(new Response(null, { headers: { 'Content-Length': '2' } }))
 +  await expect(checkLinuxReleaseUpdate(updateConfig, '0.2.3-alpha.2', 'x64', 'appimage', request, signal, mirror))
-+    .resolves.toEqual({ kind: 'available', version, url, installer: `dsh-linux-${version}-x86_64.AppImage` })
++    .resolves.toEqual({ kind: 'available', version, url, installer: `dsh-linux-${version}-amd64.AppImage` })
 +  expect(request.mock.calls.map(([requestUrl]) => requestUrl)).toEqual([
 +    mirror + releasesApi, mirror + releasesApi.replace(/page=1$/u, 'page=2'), releasesApi, mirror + url,
 +  ])
